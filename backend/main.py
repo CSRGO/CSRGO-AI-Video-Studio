@@ -10,8 +10,8 @@ app = FastAPI(title="CSRGO AI Video Studio", version="1.0.0", description="Fully
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"]
 )
@@ -20,9 +20,10 @@ app.include_router(router, prefix="/api")
 
 @app.on_event("startup")
 def on_startup():
-    import threading
-    from backend.services.ollama_manager import ollama_manager
-    threading.Thread(target=ollama_manager.verify_and_initialize, kwargs={"skip_smoke_test": True}, daemon=True).start()
+    # A restarted process cannot retain worker threads; expose interrupted work honestly.
+    from backend.database.db import get_connection
+    with get_connection() as conn:
+        conn.execute("UPDATE projects SET status='failed', stage='interrupted', error_message='Backend restarted during production. Start production again.' WHERE status IN ('processing','queued')")
 
 @app.get("/")
 def root():

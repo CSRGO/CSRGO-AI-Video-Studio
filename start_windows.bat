@@ -19,23 +19,16 @@ if not exist "%ROOT_DIR%\.env" (
     )
 )
 
-:: 1. Check Ollama
-echo [1/4] Verifying Ollama local model service...
-curl.exe -s http://127.0.0.1:11434/api/tags >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo [INFO] Starting local Ollama service in background...
-    start "" ollama serve >nul 2>&1
-    ping 127.0.0.1 -n 4 >nul
-) else (
-    echo [OK] Ollama service is online.
-)
+:: Model source is selected in the dashboard; do not force Ollama for FreeLLMAPI users.
+echo [1/4] Start your selected provider: Ollama or FreeLLMAPI desktop.
+echo [INFO] FreeLLMAPI desktop default: http://127.0.0.1:31415
 
 :: 2. Check Frontend node_modules
 echo [2/4] Verifying Frontend dependencies...
 if not exist "%ROOT_DIR%\frontend\node_modules" (
     echo [INFO] Installing frontend packages...
     cd /d "%ROOT_DIR%\frontend"
-    call npm.cmd install
+    call npm.cmd ci
     cd /d "%ROOT_DIR%"
 ) else (
     echo [OK] Frontend packages verified.

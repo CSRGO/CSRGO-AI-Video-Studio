@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
+import ModelSettings from './ModelSettings';
 
-const API = 'http://127.0.0.1:8000';
+const API = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -37,9 +38,12 @@ export default function App() {
     music_enabled: true,
     sfx_enabled: true,
     subtitles_enabled: true,
-    draft_render: false
+    draft_render: false, expressive_voice: true
   });
 
+  const [notice, setNotice] = useState('');
+  const [deleting, setDeleting] = useState(null);
+  const [sourceText, setSourceText] = useState('');
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState('');
   const [copiedNotification, setCopiedNotification] = useState(false);
@@ -173,7 +177,7 @@ export default function App() {
       const createRes = await fetch(`${API}/api/projects`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formData)
+        body: JSON.stringify({ ...formData, source_urls: sourceText.split(/\n/).map(s => s.trim()).filter(Boolean) })
       });
 
       if (!createRes.ok) {
@@ -190,7 +194,8 @@ export default function App() {
       });
 
       if (!produceRes.ok) {
-        throw new Error('Failed to start video production');
+        const failure = await produceRes.json();
+        throw new Error(failure.detail || 'Failed to start video production');
       }
 
       const jobData = await produceRes.json();
@@ -206,17 +211,30 @@ export default function App() {
     }
   }
 
-  async function handleDeleteProject(id) {
-    if (!confirm('Are you sure you want to delete this project?')) return;
+  async function retryProduction() {
+    setCreating(true); setNotice('');
     try {
-      await fetch(`${API}/api/projects/${id}`, { method: 'DELETE' });
+      const res = await fetch(`${API}/api/projects/${activeProject.id}/produce`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Could not start production');
+      setActiveJob(data.job);
+      setActiveProject(p => ({ ...p, status: 'processing', stage: 'starting', progress: 0, error_message: null }));
       fetchProjects();
-      if (activeProject?.id === id) {
-        setActiveProject(null);
-      }
-    } catch (err) {
-      alert('Error deleting project: ' + err.message);
-    }
+    } catch (e) { setNotice(e.message); } finally { setCreating(false); }
+  }
+
+  async function handleDeleteProject(id) {
+    setDeleting(id); setNotice('');
+    document.querySelectorAll('video').forEach(video => { if (video.src.includes(`/projects/${id}/`)) { video.pause(); video.removeAttribute('src'); video.load(); } });
+    try {
+      const response = await fetch(`${API}/api/projects/${id}`, { method: 'DELETE' });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || 'Deletion failed');
+      await fetchProjects();
+      if (activeProject?.id === id) { setActiveProject(null); setActiveJob(null); }
+      setNotice('Video and all related files deleted.');
+    } catch (err) { setNotice('Could not delete video: ' + err.message); }
+    finally { setDeleting(null); }
   }
 
   function copyText(txt) {
@@ -284,13 +302,13 @@ export default function App() {
           className={`nav-item ${activeTab === 'styles' ? 'active' : ''}`}
           onClick={() => setActiveTab('styles')}
         >
-          🎨 <span>99 Visual Styles</span>
+          🎨 <span>{styles.length || 100} Visual Styles</span>
         </button>
         <button
           className={`nav-item ${activeTab === 'voices' ? 'active' : ''}`}
           onClick={() => setActiveTab('voices')}
         >
-          🎙 <span>54 Offline Voices</span>
+          🎙 <span>{voices.length} Offline Voices</span>
         </button>
         <button
           className={`nav-item ${activeTab === 'audio' ? 'active' : ''}`}
@@ -304,7 +322,7 @@ export default function App() {
           className={`nav-item ${activeTab === 'settings' ? 'active' : ''}`}
           onClick={() => setActiveTab('settings')}
         >
-          ⚙ <span>System & Hardware</span>
+          ⚙ <span>Models & Settings</span>
         </button>
         <button
           className={`nav-item ${activeTab === 'logs' ? 'active' : ''}`}
@@ -315,7 +333,7 @@ export default function App() {
 
         <div className="sidebar-bottom">
           <span className="local-dot"></span> RESEARCH-DRIVEN STUDIO
-          <small>Intel i5 · GTX 1650 (4GB) · Ollama Qwen3</small>
+          <small>Local rendering · your choice of model</small>
         </div>
       </aside>
 
@@ -327,10 +345,12 @@ export default function App() {
             {activeTab.charAt(0).toUpperCase() + activeTab.slice(1).replace('-', ' ')}
           </div>
           <div className="top-status">
-            <span className="local-dot"></span> 100% LOCAL INFERENCE · FACT-VERIFIED
+            <span className="local-dot"></span> {health?.ai?.provider === 'freellmapi' ? 'FREELLMAPI' : 'OLLAMA'} · CLAUDE CODE
           </div>
         </header>
 
+        {notice && <div className="studio-notice" role="status">{notice}<button className="text-button" onClick={() => setNotice('')}>Dismiss</button></div>}
+        {health?.ai && !health.ai.ready && <div className="studio-notice warning"><span>{health.ai.last_error}</span><button className="text-button" onClick={() => setActiveTab('settings')}>Configure models</button></div>}
         {copiedNotification && (
           <div className="toast-notification">✓ Copied to clipboard!</div>
         )}
@@ -347,16 +367,15 @@ export default function App() {
                   Produce stories that <span>visually demonstrate</span> reality.
                 </h1>
                 <p>
-                  No generic text-card slides. CSRGO searches the web for primary sources, directs
-                  a dramatic 3-second hook, and renders interactive visual simulations (Git DAG graphs,
-                  AI agent workbenches, and neural network layers) with offline voice and procedural audio.
+                  Turn a topic into a clear story: gather sources, explain the context, and bring it to life
+                  in your selected Lemo style, with narration, music and sound tied to the action.
                 </p>
                 <div style={{ marginTop: '24px', display: 'flex', gap: '14px' }}>
                   <button className="primary-button" onClick={() => setActiveTab('create')}>
                     ✦ Create New Video →
                   </button>
                   <button className="secondary-button" onClick={() => setActiveTab('styles')}>
-                    Browse 99 Styles
+                    Browse style library
                   </button>
                 </div>
               </div>
@@ -370,22 +389,22 @@ export default function App() {
                   <h2>Production Engine Status</h2>
                   <p>Hardware verification and engine diagnostics</p>
                 </div>
-                <span className="live-label">● ALL ENGINES READY</span>
+                <span className={health?.ai?.ready ? "live-label good" : "live-label pending"}>{health?.ai?.ready ? "● MODEL CONNECTED" : "● SETUP NEEDED"}</span>
               </div>
 
               <div className="status-grid">
                 <div className="status-card">
                   <span>RESEARCH & LLM</span>
-                  <strong className={health?.ollama?.status === 'online' ? 'good' : 'pending'}>
-                    {health?.ollama?.status === 'online' ? 'Qwen3 + Web Search' : 'Checking...'}
+                  <strong className={health?.ai?.ready ? 'good' : 'pending'}>
+                    {health?.ai?.ready ? 'Model connected' : 'Model setup needed'}
                   </strong>
-                  <small>DuckDuckGo Web Search · Qwen3 1.7B</small>
+                  <small>{health?.ai?.planning_model || 'Configure in Models & Settings'}</small>
                 </div>
 
                 <div className="status-card">
                   <span>OFFLINE NEURAL SPEECH</span>
                   <strong className={health?.tts?.status === 'available' ? 'good' : 'pending'}>
-                    54 Offline Voices
+                    {voices.length} Offline Voices
                   </strong>
                   <small>Kokoro v1.0 ONNX · 24kHz Neural</small>
                 </div>
@@ -395,12 +414,12 @@ export default function App() {
                   <strong className={health?.ffmpeg?.status === 'available' ? 'good' : 'pending'}>
                     Playwright + FFmpeg
                   </strong>
-                  <small>Deterministic Frames · libx264 8.8x</small>
+                  <small>Deterministic frames · CPU encoding</small>
                 </div>
 
                 <div className="status-card">
                   <span>LEMO-OPUSCAR STYLES</span>
-                  <strong className="good">99 Styles Active</strong>
+                  <strong className="good">{styles.length} Styles in Library</strong>
                   <small>Swiss, Neon, Blueprint, Keynote & more</small>
                 </div>
               </div>
@@ -444,7 +463,7 @@ export default function App() {
                         <button
                           className="secondary-button"
                           onClick={() => {
-                            setActiveProject(p);
+                            setActiveProject(p); setActiveJob(null);
                             loadProjectDetails(p.id);
                             setActiveTab('queue');
                           }}
@@ -521,11 +540,18 @@ export default function App() {
                       placeholder="https://github.com/owner/repository"
                       required
                     />
-                    <small>CSRGO will shallow clone, inspect README/architecture with Qwen2.5-Coder, and build a verified technical breakdown.</small>
+                    <small>Claude Code will research the repository page and explain its purpose using source-backed claims.</small>
                   </label>
                 </div>
               )}
 
+              <label className="field-label" style={{ marginTop: 18 }}>Trusted source URLs (optional, one per line)
+                <textarea rows={2} value={sourceText} onChange={e => setSourceText(e.target.value)} placeholder="https://…" />
+                <small>For a specific event, include its date in the topic. Source URLs help when web search is unavailable.</small>
+              </label>
+              <div className="model-summary"><span>Claude Code · {health?.ai?.provider === 'freellmapi' ? 'FreeLLMAPI' : 'Ollama'} · {health?.ai?.planning_model}</span>
+                <button type="button" className="text-button" onClick={() => setActiveTab('settings')}>Change models →</button>
+              </div>
               {/* Title */}
               <label className="field-label" style={{ marginTop: '18px' }}>
                 PROJECT TITLE (OPTIONAL)
@@ -545,10 +571,11 @@ export default function App() {
                     value={formData.target_duration}
                     onChange={e => setFormData(prev => ({ ...prev, target_duration: Number(e.target.value) }))}
                   >
-                    <option value={15}>15 Seconds (Rapid Short / 3 Visual Scenes)</option>
-                    <option value={30}>30 Seconds (Social Reel / 4 Visual Scenes)</option>
-                    <option value={45}>45 Seconds (Recommended Explainer / 5 Visual Scenes)</option>
-                    <option value={60}>60 Seconds (Deep Dive / 6-7 Visual Scenes)</option>
+                    <option value={10}>10 Seconds (Brief story)</option>
+                    <option value={15}>15 Seconds (Quick short)</option>
+                    <option value={30}>30 Seconds (Social reel)</option>
+                    <option value={45}>45 Seconds (Explainer)</option>
+                    <option value={60}>60 Seconds (Full story)</option>
                   </select>
                 </label>
 
@@ -559,7 +586,7 @@ export default function App() {
                     onChange={e => setFormData(prev => ({
                       ...prev,
                       aspect_ratio: e.target.value,
-                      resolution: e.target.value === '16:9' ? '1920x1080' : e.target.value === '1:1' ? '1080x1080' : '1080x1920'
+                      resolution: e.target.value === '16:9' ? '1920x1080' : e.target.value === '1:1' ? '1080x1080' : e.target.value === '4:5' ? '1080x1350' : '1080x1920'
                     }))}
                   >
                     <option value="9:16">9:16 — YouTube Shorts / Reels / TikTok (1080x1920)</option>
@@ -577,7 +604,7 @@ export default function App() {
                     VISUAL STYLE & SIMULATION GRAMMAR
                   </label>
                   <button type="button" className="text-button" onClick={() => setActiveTab('styles')}>
-                    Browse All 99 Styles →
+                    Browse style library →
                   </button>
                 </div>
                 <select
@@ -594,8 +621,8 @@ export default function App() {
                   </optgroup>
                   <optgroup label="All Styles in Library">
                     {styles.map(s => (
-                      <option key={s.slug} value={s.slug}>
-                        {s.name} ({s.category})
+                      <option key={s.slug} value={s.slug} disabled={s.available === false}>
+                        {s.name} ({s.category}){s.available === false ? ' · needs image assets' : ''}
                       </option>
                     ))}
                   </optgroup>
@@ -617,7 +644,7 @@ export default function App() {
                       <option value="bm_george">George (Male, British · Technical Documentary)</option>
                     </optgroup>
                     <optgroup label="Other Voices">
-                      {voices.slice(0, 20).map(v => (
+                      {voices.map(v => (
                         <option key={v.id} value={v.id}>{v.name}</option>
                       ))}
                     </optgroup>
@@ -642,6 +669,16 @@ export default function App() {
                 </label>
               </div>
 
+              <div className="form-grid-2" style={{ marginTop: 20 }}>
+                <label className="field-label">Narration language<select value={formData.language} onChange={e => { const language = e.target.value; const prefixes = { en: 'af_', hi: 'hf_', es: 'ef_', fr: 'ff_', ja: 'jf_', zh: 'zf_', pt: 'pf_', it: 'if_' }; const narrator = voices.find(v => v.id.startsWith(prefixes[language])); setFormData(p => ({ ...p, language, voice: narrator?.id || p.voice })); }}>
+                  <option value="en">English</option><option value="hi">Hindi</option><option value="es">Spanish</option>
+                  <option value="fr">French</option><option value="ja">Japanese</option><option value="zh">Chinese</option>
+                  <option value="pt">Portuguese</option><option value="it">Italian</option>
+                </select><small>Select a compatible narrator voice for your language.</small></label>
+                <label className="checkbox-label"><input type="checkbox" checked={formData.expressive_voice} onChange={e => setFormData(p => ({ ...p, expressive_voice: e.target.checked }))} />
+                  Topic-aware delivery (subtle pitch, pacing and pauses)
+                </label>
+              </div>
               {/* Audio & Rendering Switches */}
               <div className="switches-grid" style={{ marginTop: '24px' }}>
                 <label className="checkbox-label">
@@ -677,13 +714,13 @@ export default function App() {
                     checked={formData.draft_render}
                     onChange={e => setFormData(prev => ({ ...prev, draft_render: e.target.checked }))}
                   />
-                  <span>Draft Preview Quality (Half-resolution for 3x render acceleration)</span>
+                  <span>Draft Preview Quality (Half-resolution rendering)</span>
                 </label>
               </div>
 
               {/* Action */}
               <div className="create-footer" style={{ marginTop: '32px' }}>
-                <div style={{ fontSize: '12px', color: '#77798a' }}>
+                <div style={{ fontSize: '12px', color: '#62708a' }}>
                   Web Research → Story Treatment → Visual Simulation → Muxing (-14 LUFS)
                 </div>
 
@@ -733,11 +770,11 @@ export default function App() {
                     <div>
                       <span className="badge-tag">{activeProject.style_slug}</span>
                       <h2 style={{ margin: '8px 0' }}>{activeProject.name}</h2>
-                      <p style={{ color: '#999aaa', fontSize: '13px' }}>{activeProject.topic}</p>
+                      <p style={{ color: '#62708a', fontSize: '13px' }}>{activeProject.topic}</p>
                     </div>
                     <div style={{ textAlign: 'right' }}>
                       <div className="big-percent">{activeProject.progress || 0}%</div>
-                      <small style={{ color: '#77798a' }}>{activeProject.stage}</small>
+                      <small style={{ color: '#62708a' }}>{activeProject.stage}</small>
                     </div>
                   </div>
 
@@ -753,6 +790,10 @@ export default function App() {
                     {activeJob?.message || activeProject.error_message || 'Processing workflow...'}
                   </div>
 
+                  {['draft', 'failed'].includes(activeProject.status) && <button className="primary-button" disabled={creating} onClick={retryProduction} style={{ marginTop: 16 }}>
+                    {creating ? 'Starting…' : activeProject.status === 'failed' ? 'Retry production' : 'Start production'}
+                  </button>}
+
                   {/* Visual Pipeline Stages */}
                   <div className="stages-flow">
                     {[
@@ -765,7 +806,7 @@ export default function App() {
                       { key: 'qc', label: 'QC Suite' },
                       { key: 'completed', label: 'Ready' }
                     ].map((st, idx) => {
-                      const stages = ['created', 'research', 'treatment', 'script', 'voice', 'subtitles', 'visuals', 'audio_mix', 'rendering', 'muxing', 'post_process', 'qc', 'completed'];
+                      const stages = ['created', 'starting', 'init_ai', 'research', 'treatment', 'script', 'voice', 'subtitles', 'claude_code', 'visuals', 'audio_mix', 'rendering', 'muxing', 'post_process', 'qc', 'completed'];
                       const currentIdx = stages.indexOf(activeProject.stage);
                       const stageIdx = stages.indexOf(st.key);
                       const isDone = currentIdx > stageIdx || activeProject.status === 'completed';
@@ -901,7 +942,7 @@ export default function App() {
                         <div>
                           <div className="qc-box" style={{ marginBottom: '24px' }}>
                             <strong>Summary:</strong>
-                            <p style={{ marginTop: '6px', color: '#eee' }}>{projectResearch.summary}</p>
+                            <p style={{ marginTop: '6px', color: '#27364e' }}>{projectResearch.summary}</p>
                           </div>
 
                           <h3 style={{ marginBottom: '12px' }}>Discovered Primary Sources ({projectResearch.sources?.length || 0})</h3>
@@ -913,11 +954,11 @@ export default function App() {
                                     href={src.url}
                                     target="_blank"
                                     rel="noreferrer"
-                                    style={{ color: '#00f0ff', fontWeight: 600, textDecoration: 'none' }}
+                                    style={{ color: '#5641b7', fontWeight: 600, textDecoration: 'none' }}
                                   >
                                     {src.title} ↗
                                   </a>
-                                  <p style={{ fontSize: '12px', color: '#8f93a7', marginTop: '4px' }}>{src.snippet}</p>
+                                  <p style={{ fontSize: '12px', color: '#62708a', marginTop: '4px' }}>{src.snippet}</p>
                                 </div>
                                 <span className="badge-tag">{src.credibility}</span>
                               </div>
@@ -925,7 +966,7 @@ export default function App() {
                           </div>
 
                           <h3 style={{ marginTop: '24px', marginBottom: '12px' }}>Key Factual Claims</h3>
-                          <ul style={{ paddingLeft: '20px', color: '#c4c6d8', fontSize: '13.5px', lineHeight: '1.8' }}>
+                          <ul style={{ paddingLeft: '20px', color: '#52617b', fontSize: '13.5px', lineHeight: '1.8' }}>
                             {projectResearch.key_findings?.map((kf, i) => (
                               <li key={i}>{kf}</li>
                             ))}
@@ -951,14 +992,14 @@ export default function App() {
                       ) : (
                         <div>
                           <pre style={{
-                            background: '#090a10',
+                            background: '#f4f6fb',
                             padding: '20px',
                             borderRadius: '10px',
                             whiteSpace: 'pre-wrap',
                             fontFamily: 'inherit',
                             fontSize: '13px',
                             lineHeight: '1.6',
-                            color: '#e2e5f5'
+                            color: '#27364e'
                           }}>
                             {projectTreatment.treatment}
                           </pre>
@@ -967,9 +1008,9 @@ export default function App() {
                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '14px' }}>
                             {projectTreatment.shot_list?.map((shot, i) => (
                               <div key={i} className="status-card">
-                                <span style={{ color: '#a78bfa' }}>SHOT {shot.shot_number} · {shot.framing.toUpperCase()}</span>
+                                <span style={{ color: '#6251d5' }}>SHOT {shot.shot_number} · {(shot.framing || 'medium').toUpperCase()}</span>
                                 <strong>{shot.scene_title}</strong>
-                                <small style={{ color: '#00f0ff' }}>Camera Move: {shot.camera_move}</small>
+                                <small style={{ color: '#5641b7' }}>Camera Move: {shot.camera_move}</small>
                                 <p style={{ fontSize: '11.5px', color: '#888', marginTop: '6px' }}>
                                   Subject: {shot.focal_subject}
                                 </p>
@@ -1002,10 +1043,10 @@ export default function App() {
                                 <h3>Scene 0{sc.scene_number} · {sc.title}</h3>
                                 <span className="badge-tag">{sc.camera_move} · {sc.target_duration}s</span>
                               </div>
-                              <p style={{ color: '#00f0ff', fontWeight: 600, margin: '8px 0' }}>
+                              <p style={{ color: '#5641b7', fontWeight: 600, margin: '8px 0' }}>
                                 🎬 Visual Subject: {sc.visual_subject}
                               </p>
-                              <p style={{ color: '#e0e2f0', fontSize: '13.5px' }}>
+                              <p style={{ color: '#27364e', fontSize: '13.5px' }}>
                                 <strong>Narration:</strong> "{sc.narration}"
                               </p>
                               <p style={{ color: '#888a9e', fontSize: '12px', marginTop: '6px' }}>
@@ -1064,7 +1105,7 @@ export default function App() {
                     <button
                       className="secondary-button"
                       onClick={() => {
-                        setActiveProject(p);
+                        setActiveProject(p); setActiveJob(null);
                         loadProjectDetails(p.id);
                         setActiveTab('queue');
                       }}
@@ -1073,9 +1114,10 @@ export default function App() {
                     </button>
                     <button
                       className="delete-button"
+                      disabled={deleting === p.id || p.status === 'processing'}
                       onClick={() => handleDeleteProject(p.id)}
                     >
-                      Delete
+                      {deleting === p.id ? 'Deleting…' : 'Delete video & all files'}
                     </button>
                   </div>
                 </div>
@@ -1092,7 +1134,7 @@ export default function App() {
             <div className="section-heading">
               <div>
                 <div className="eyebrow">LEMO-OPUSCAR REPERTOIRE</div>
-                <h2>99 Visual Film Styles</h2>
+                <h2>Lemo Visual Film Styles</h2>
                 <p>Dynamic motion, camera grammar, and procedural rendering</p>
               </div>
               <input
@@ -1122,6 +1164,7 @@ export default function App() {
                   key={s.slug}
                   className={`style-card ${formData.style_slug === s.slug ? 'selected' : ''}`}
                   onClick={() => {
+                    if (s.available === false) { setNotice('This style requires generated image assets. Choose an available code-rendered style.'); return; }
                     setFormData(prev => ({ ...prev, style_slug: s.slug }));
                     setActiveTab('create');
                   }}
@@ -1139,7 +1182,7 @@ export default function App() {
                     <span className="style-cat">{s.category}</span>
                     <p>{s.description}</p>
                     <button className="style-use-btn">
-                      {formData.style_slug === s.slug ? '✓ Selected' : 'Use Style →'}
+                      {s.available === false ? 'Image assets required' : formData.style_slug === s.slug ? '✓ Selected' : 'Use Style →'}
                     </button>
                   </div>
                 </div>
@@ -1156,7 +1199,7 @@ export default function App() {
             <div className="section-heading">
               <div>
                 <div className="eyebrow">OFFLINE NEURAL VOICES</div>
-                <h2>54 Kokoro ONNX Voices</h2>
+                <h2>Kokoro Narrator Voices</h2>
                 <p>High-fidelity 24kHz speech synthesized locally on CPU with zero internet</p>
               </div>
             </div>
@@ -1270,6 +1313,9 @@ export default function App() {
                         .SRT
                       </a>
                     </div>
+                    <button className="delete-button" style={{ marginTop: 12 }} disabled={deleting === p.id} onClick={() => handleDeleteProject(p.id)}>
+                      {deleting === p.id ? 'Deleting…' : 'Delete video & all files'}
+                    </button>
                   </div>
                 </div>
               ))}
@@ -1285,52 +1331,14 @@ export default function App() {
             <div className="section-heading">
               <div>
                 <div className="eyebrow">ENVIRONMENT CONFIGURATION</div>
-                <h2>Workstation Hardware & Settings</h2>
-                <p>Configured for Intel i5 9th Gen and GTX 1650 4GB VRAM</p>
+                <h2>Models & Production Settings</h2>
+                <p>Choose local inference or your FreeLLMAPI desktop models, with local rendering.</p>
               </div>
             </div>
 
-            <div className="settings-section">
-              <div className="setting-row">
-                <div>
-                  <strong>Ollama Endpoint</strong>
-                  <p>Local API host for LLM script and repository analysis</p>
-                </div>
-                <code>http://127.0.0.1:11434</code>
-              </div>
-
-              <div className="setting-row">
-                <div>
-                  <strong>Scriptwriting & Research Model</strong>
-                  <p>Runs sequentially to protect 4GB VRAM</p>
-                </div>
-                <code>qwen3:1.7b</code>
-              </div>
-
-              <div className="setting-row">
-                <div>
-                  <strong>Code Analysis Model</strong>
-                  <p>Used for GitHub repositories</p>
-                </div>
-                <code>qwen2.5-coder:3b</code>
-              </div>
-
-              <div className="setting-row">
-                <div>
-                  <strong>Frame Rendering Engine</strong>
-                  <p>Playwright Chromium + FFmpeg libx264</p>
-                </div>
-                <code>8.8x Real-Time Speed (CPU)</code>
-              </div>
-
-              <div className="setting-row">
-                <div>
-                  <strong>Voice Engine</strong>
-                  <p>Kokoro v1.0 ONNX</p>
-                </div>
-                <code>54 Neural Voices (Offline)</code>
-              </div>
-            </div>
+            <ModelSettings api={API} onSaved={fetchHealth} />
+            <div className="setting-row"><div><strong>Offline narration</strong><p>Kokoro speech with measured timing, restrained pitch and pacing adjustments.</p></div></div>
+            <div className="setting-row"><div><strong>Renderer</strong><p>Claude-generated Canvas scenes · Chromium · FFmpeg. Video completion requires quality checks to pass.</p></div></div>
           </div>
         )}
 
@@ -1359,7 +1367,7 @@ export default function App() {
         {/* Studio Footer */}
         <footer>
           CSRGO AI VIDEO STUDIO · RESEARCH-DRIVEN CINEMATIC UPGRADE
-          <span>100% Free · 100% Local Inference · Intel i5 + GTX 1650 Verified</span>
+          <span>Free model options · local rendering · source-backed storytelling</span>
         </footer>
       </main>
     </div>

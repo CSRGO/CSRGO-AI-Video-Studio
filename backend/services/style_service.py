@@ -30,6 +30,8 @@ class StyleService:
 
                     style_info = {
                         "slug": slug,
+                        "needs": data.get("needs", []),
+                        "available": "image-generation" not in data.get("needs", []),
                         "num": data.get("num", ""),
                         "name": data.get("en", slug.replace("-", " ").title()),
                         "name_cn": data.get("cn", ""),

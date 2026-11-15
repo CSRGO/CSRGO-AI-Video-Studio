@@ -1,4 +1,5 @@
 import os
+import threading
 import re
 import urllib.request
 import numpy as np
@@ -58,16 +59,18 @@ def ensure_kokoro_models(force: bool = False):
 class TTSService:
     def __init__(self):
         self._kokoro = None
+        self._engine_lock = threading.RLock()
         self._voices_cache = []
 
     def _get_engine(self):
-        if self._kokoro is None:
-            if not os.path.exists(MODEL_PATH) or not os.path.exists(VOICES_PATH):
-                print(f"[Kokoro TTS] Model files not found. Auto-downloading...")
-                ensure_kokoro_models()
-            from kokoro_onnx import Kokoro
-            self._kokoro = Kokoro(MODEL_PATH, VOICES_PATH)
-        return self._kokoro
+        with self._engine_lock:
+            if self._kokoro is None:
+                if not os.path.exists(MODEL_PATH) or not os.path.exists(VOICES_PATH):
+                    print(f"[Kokoro TTS] Model files not found. Auto-downloading...")
+                    ensure_kokoro_models()
+                from kokoro_onnx import Kokoro
+                self._kokoro = Kokoro(MODEL_PATH, VOICES_PATH)
+            return self._kokoro
 
     def get_voices(self) -> List[Dict[str, str]]:
         if not self._voices_cache:
@@ -104,7 +107,10 @@ class TTSService:
                         accent = "Chinese"
                         name = v[3:].capitalize()
                     else:
-                        name = v.capitalize()
+                        accents = {"h": "Hindi", "j": "Japanese", "f": "French", "e": "Spanish", "i": "Italian", "p": "Portuguese"}
+                        accent = accents.get(v[:1], "Other")
+                        gender = "Female" if v[1:2] == "f" else "Male" if v[1:2] == "m" else "Neutral"
+                        name = v[3:].capitalize()
 
                     categorized.append({
                         "id": v,
@@ -115,15 +121,8 @@ class TTSService:
                     })
                 self._voices_cache = categorized
             except Exception as e:
-                # Fallback voice list if model not loaded yet
-                self._voices_cache = [
-                    {"id": "af_bella", "name": "Bella (Female, American)", "gender": "Female", "accent": "American", "tag": "af_bella"},
-                    {"id": "af_sarah", "name": "Sarah (Female, American)", "gender": "Female", "accent": "American", "tag": "af_sarah"},
-                    {"id": "am_michael", "name": "Michael (Male, American)", "gender": "Male", "accent": "American", "tag": "am_michael"},
-                    {"id": "am_adam", "name": "Adam (Male, American)", "gender": "Male", "accent": "American", "tag": "am_adam"},
-                    {"id": "bf_emma", "name": "Emma (Female, British)", "gender": "Female", "accent": "British", "tag": "bf_emma"},
-                    {"id": "bm_george", "name": "George (Male, British)", "gender": "Male", "accent": "British", "tag": "bm_george"}
-                ]
+                self.last_error = f"Kokoro model loading failed: {type(e).__name__}"
+                return []
         return self._voices_cache
 
     def estimate_duration_seconds(self, text: str, speed: float = 1.0) -> float:
@@ -158,58 +157,70 @@ class TTSService:
         trimmed = self.trim_silence(samples, sr)
         return trimmed, sr
 
-    def synthesize_scenes(self, scenes: List[Dict[str, Any]], out_dir: str, voice: str = "af_bella", speed: float = 1.0) -> List[Dict[str, Any]]:
-        """
-        Synthesize audio for each scene in the storyboard, save individual wav files,
-        and generate a master combined narration track.
-        """
+    def _process_voice(self, samples, sr, pitch=1.0, tempo=1.0):
+        """Small, formant-preserving pitch/rate changes using FFmpeg rubberband."""
+        import subprocess
+        result = subprocess.run([
+            "ffmpeg", "-v", "error", "-f", "f32le", "-ar", str(sr), "-ac", "1", "-i", "pipe:0",
+            "-af", f"rubberband=tempo={tempo:.5f}:pitch={pitch:.5f}:formant=preserved",
+            "-f", "f32le", "pipe:1"], input=np.asarray(samples, dtype=np.float32).tobytes(),
+            capture_output=True, timeout=60)
+        if result.returncode:
+            raise RuntimeError("Expressive voice processing requires FFmpeg with the rubberband filter.")
+        return np.frombuffer(result.stdout, dtype=np.float32).copy()
+
+    def synthesize_scenes(self, scenes, out_dir, voice="af_bella", speed=1.0,
+                          language="en", target_duration=None, expressive=True):
         os.makedirs(out_dir, exist_ok=True)
-        results = []
-        all_samples = []
-        sample_rate = 24000
-        current_time = 0.0
-
-        for i, scene in enumerate(scenes, 1):
+        langs = {"en": "en-us", "en-us": "en-us", "en-gb": "en-gb", "zh": "cmn", "hi": "hi",
+                 "es": "es", "fr": "fr-fr", "it": "it", "ja": "ja", "pt": "pt-br"}
+        if language not in langs:
+            raise ValueError("Unsupported narration language")
+        # Restrained delivery presets, not a claim of actor-level emotional synthesis.
+        presets = {"neutral": (1., 1.), "curious": (1.025, .98), "warm": (.99, .96),
+                   "excited": (1.045, 1.06), "serious": (.975, .95),
+                   "concerned": (.98, .97), "reassuring": (.99, .96)}
+        clips, sample_rate = [], 24000
+        for scene in scenes:
             narration = scene.get("narration", "").strip()
-            wav_filename = f"scene_{i:02d}.wav"
-            wav_path = os.path.join(out_dir, wav_filename)
-
-            if narration:
-                samples, sr = self.synthesize_line(narration, voice=voice, speed=speed)
-                sample_rate = sr
-                sf.write(wav_path, samples, sr)
-                dur = len(samples) / float(sr)
-            else:
-                dur = 2.0
-                samples = np.zeros(int(dur * sample_rate), dtype=np.float32)
-                sf.write(wav_path, samples, sample_rate)
-
-            start_t = current_time
-            end_t = start_t + dur
-            current_time = end_t + 0.35  # Natural pause between scenes
-
-            # Append to master with short pause
-            pause_samples = np.zeros(int(0.35 * sample_rate), dtype=np.float32)
-            all_samples.append(samples)
-            all_samples.append(pause_samples)
-
-            results.append({
-                "scene_index": i,
-                "narration": narration,
-                "audio_file": wav_filename,
-                "audio_path": wav_path,
-                "start_time": round(start_t, 2),
-                "end_time": round(end_t, 2),
-                "duration": round(dur, 2)
-            })
-
-        # Save concatenated full narration track
-        if all_samples:
-            full_track = np.concatenate(all_samples)
-            master_wav_path = os.path.join(out_dir, "narration_full.wav")
-            sf.write(master_wav_path, full_track, sample_rate)
-
+            if not narration:
+                raise RuntimeError("A scene is missing spoken narration.")
+            pitch, rate = presets.get(scene.get("emotion", "neutral"), (1., 1.)) if expressive else (1., 1.)
+            samples, sr = self.synthesize_line(narration, voice=voice, speed=speed * rate, lang=langs[language])
+            if len(samples) < sr * .2 or float(np.max(np.abs(samples))) < .001:
+                raise RuntimeError("Voice synthesis returned empty or silent speech.")
+            if sr != sample_rate:
+                import soxr
+                samples = soxr.resample(samples, sr, sample_rate)
+            if pitch != 1.:
+                samples = self._process_voice(samples, sample_rate, pitch=pitch)
+            clips.append(samples)
+        pauses = [max(.08, min(.6, float(s.get("pause_after", .25)))) for s in scenes]
+        natural_seconds = sum(len(c) / sample_rate for c in clips)
+        if target_duration:
+            available = target_duration - sum(pauses[:-1]) - .8
+            tempo = natural_seconds / available
+            if not .72 <= tempo <= 1.35:
+                raise RuntimeError(f"Narration is {natural_seconds:.1f}s for a {target_duration}s video. Rewrite the script; speech will not be clipped or sped up excessively.")
+            clips = [self._process_voice(c, sample_rate, tempo=tempo) for c in clips]
+        results, full, current = [], [], 0.
+        for i, (scene, samples, pause) in enumerate(zip(scenes, clips, pauses), 1):
+            path = os.path.abspath(os.path.join(out_dir, f"scene_{i:02d}.wav"))
+            sf.write(path, samples, sample_rate)
+            duration = len(samples) / sample_rate
+            results.append({"scene_index": i, "narration": scene["narration"],
+                "audio_file": os.path.basename(path), "audio_path": path,
+                "start_time": current, "end_time": current + duration, "duration": duration,
+                "emotion": scene.get("emotion", "neutral"), "pause_after": pause})
+            full.append(samples)
+            current += duration
+            if i < len(scenes):
+                silence = np.zeros(round(pause * sample_rate), dtype=np.float32)
+                full.append(silence)
+                current += len(silence) / sample_rate
+        sf.write(os.path.join(out_dir, "narration_full.wav"), np.concatenate(full), sample_rate)
         return results
+
 
 tts_service = TTSService()
 

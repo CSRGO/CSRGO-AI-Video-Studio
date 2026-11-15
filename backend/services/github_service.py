@@ -97,7 +97,7 @@ Provide a concise, factual summary formatted as:
             analysis = ollama_service.generate(
                 prompt=prompt,
                 model=settings.ollama_code_model, # qwen2.5-coder:3b
-                system=system_prompt
+                system=system_prompt, purpose="coding"
             )
 
             return {

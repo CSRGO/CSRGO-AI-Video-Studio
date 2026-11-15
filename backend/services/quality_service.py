@@ -82,7 +82,9 @@ class QualityService:
             "-q:v", "2",
             sheet_path
         ]
-        subprocess.run(cmd, capture_output=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, timeout=30)
+        if result.returncode or not os.path.exists(sheet_path):
+            raise RuntimeError("Could not generate the quality-control contact sheet.")
         return sheet_path
 
     def verify_visual_diversity(self, storyboard: Dict[str, Any], sheet_path: Optional[str] = None) -> Dict[str, Any]:
@@ -152,6 +154,9 @@ class QualityService:
             import soundfile as sf
             info = sf.info(mix_p)
             mix_dur = info.duration
+            voice, _ = sf.read(os.path.join(audio_dir, "stem_voice.wav"))
+            if float(np.sqrt(np.mean(voice ** 2))) < .005:
+                return {"passed": False, "reason": "Narration stem is silent or too quiet"}
             if abs(mix_dur - video_dur) > 2.0:
                 return {
                     "passed": False,
@@ -183,9 +188,11 @@ class QualityService:
             src_ids = {s.get("source_id") for s in sources}
             for c in claims:
                 supp = c.get("supporting_source_ids", [])
-                if not any(s_id in src_ids for s_id in supp):
+                if not supp or any(s_id not in src_ids for s_id in supp):
                     return {"passed": False, "reason": f"Claim {c.get('claim_id')} lacks verified source citation"}
 
+            from backend.services.research_service import research_service
+            research_service.validate_claims(claims, sources)
             return {
                 "passed": True,
                 "claims_count": len(claims),
@@ -194,13 +201,36 @@ class QualityService:
         except Exception as e:
             return {"passed": False, "reason": f"Research validation error: {e}"}
 
+    def verify_exported_narration(self, video_path, audio_dir):
+        """Check the decoded export contains the actual voice, not only music/silence."""
+        import soundfile as sf
+        import soxr
+        voice, sr = sf.read(os.path.join(audio_dir, "stem_voice.wav"))
+        if voice.ndim > 1:
+            voice = voice.mean(axis=1)
+        voice = soxr.resample(voice, sr, 16000)
+        result = subprocess.run(["ffmpeg", "-v", "error", "-i", video_path, "-map", "0:a:0",
+            "-ar", "16000", "-ac", "1", "-f", "f32le", "pipe:1"], capture_output=True, timeout=60)
+        if result.returncode:
+            return False
+        exported = np.frombuffer(result.stdout, dtype=np.float32)
+        n = min(len(voice), len(exported))
+        if n < 16000 or np.sqrt(np.mean(exported[:n] ** 2)) < .005:
+            return False
+        mask = np.abs(voice[:n]) > .01
+        if mask.sum() < 1000:
+            return False
+        corr = np.corrcoef(voice[:n][mask], exported[:n][mask])[0, 1]
+        return bool(np.isfinite(corr) and corr > .45)
+
     def run_qc_suite(
         self,
         video_path: str,
         target_dur: float,
         min_acceptable_dur: float = 5.0,
         storyboard: Optional[Dict[str, Any]] = None,
-        project_dir: Optional[str] = None
+        project_dir: Optional[str] = None,
+        expected_dimensions=None, expected_fps=24
     ) -> Dict[str, Any]:
         """Runs the complete QC suite enforcing visual, audio, and research honesty."""
         probe = self.inspect_video(video_path)
@@ -216,13 +246,13 @@ class QualityService:
             "playable": True,
             "has_video_stream": probe.get("has_video", False),
             "has_audio_stream": probe.get("has_audio", False),
-            "duration_valid": probe.get("duration", 0.0) >= min_acceptable_dur,
-            "resolution_valid": (probe.get("width", 0) or 0) > 0 and (probe.get("height", 0) or 0) > 0,
-            "fps_valid": (probe.get("fps", 0) or 0) >= 20
+            "duration_valid": abs(probe.get("duration", 0.0) - target_dur) <= max(.3, 2 / expected_fps),
+            "resolution_valid": (probe.get("width"), probe.get("height")) == tuple(expected_dimensions) if expected_dimensions else (probe.get("width", 0) or 0) > 0 and (probe.get("height", 0) or 0) > 0,
+            "fps_valid": abs(probe.get("fps", 0) - expected_fps) < .1
         }
 
         # Visual Diversity Check
-        sheet_path = os.path.join(os.path.dirname(video_path), "contact_sheet.jpg")
+        sheet_path = os.path.join(project_dir, "renders", "contact_sheet.jpg") if project_dir else os.path.join(os.path.dirname(video_path), "contact_sheet.jpg")
         if storyboard:
             div_check = self.verify_visual_diversity(storyboard, sheet_path=sheet_path)
             checks["visual_diversity_passed"] = div_check["passed"]
@@ -236,6 +266,14 @@ class QualityService:
             checks["audio_stems_passed"] = aud_check["passed"]
             if not aud_check["passed"]:
                 checks["audio_stems_reason"] = aud_check.get("reason")
+
+            visual_path = os.path.join(project_dir, "renders", "visual_check.json")
+            try:
+                with open(visual_path, encoding="utf-8") as f:
+                    checks["generated_scenes_animated"] = json.load(f).get("passed") is True
+            except (OSError, ValueError):
+                checks["generated_scenes_animated"] = False
+            checks["narration_audible_in_export"] = self.verify_exported_narration(video_path, audio_dir)
 
             # Research Claims Check
             res_check = self.verify_research_claims(project_dir)

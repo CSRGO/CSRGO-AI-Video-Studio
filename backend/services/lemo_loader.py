@@ -39,7 +39,11 @@ class LemoLoader:
         if style_slug in self._cache:
             return self._cache[style_slug]
 
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", style_slug):
+            raise ValueError("Invalid style slug")
         style_path = os.path.join(self.styles_dir, style_slug)
+        if not os.path.isfile(os.path.join(style_path, "STYLE.md")):
+            raise ValueError(f"Unknown Lemo style: {style_slug}")
         json_path = os.path.join(style_path, "style.json")
         md_path = os.path.join(style_path, "STYLE.md")
 
@@ -89,6 +93,24 @@ MOTION & CAMERA:
         }
         self._cache[style_slug] = res
         return res
+
+    def production_context(self, style_slug: str) -> str:
+        """Pass the actual selected skill, not a generic three-palette preset."""
+        rule = self.load_style_rule(style_slug)
+        with open(rule["raw_md_path"], encoding="utf-8") as f:
+            style_text = f.read()
+        root = os.path.dirname(self.styles_dir)
+        with open(os.path.join(root, "DIRECTOR.md"), encoding="utf-8") as f:
+            director = f.read()
+        shorts = os.path.join(os.path.dirname(root), "claude-animated-shorts", "SKILL.md")
+        with open(shorts, encoding="utf-8") as f:
+            audio_story = f.read().split("## Final look values")[0]
+        return (f"SELECTED STYLE: {style_slug}\n{style_text}\n"
+                f"LEMO DIRECTION RULES:\n{director[:14500]}\n"
+                f"ANIMATED SHORTS STORY/AUDIO WORKFLOW:\n{audio_story}\n"
+                "Apply the application's chosen language, captions, duration and expressive voice settings "
+                "over example-specific preferences. The Lemo style is the visual authority. "
+                "Do not copy demo scripts or private reference images.")
 
     def _extract_section(self, text: str, header_candidates: List[str]) -> str:
         if not text:

@@ -4,11 +4,13 @@ import time
 import uuid
 import shutil
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 from backend.database.db import get_connection
-from backend.services.ollama_manager import ollama_manager
+from backend.services.ai_service import ai_service
+from backend.services.lemo_loader import lemo_loader
+from pathlib import Path
 from backend.services.claude_animation_worker import claude_animation_worker
 from backend.services.research_service import research_service
 from backend.services.script_service import script_service
@@ -28,6 +30,7 @@ class ProjectService:
         os.makedirs(PROJECTS_DIR, exist_ok=True)
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         self._active_jobs: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()
 
     def _slugify(self, text: str) -> str:
         clean = "".join(c if c.isalnum() or c in "-_" else "-" for c in text.lower()).strip("-")
@@ -44,11 +47,14 @@ class ProjectService:
         return d
 
     def create_project(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        lemo_loader.load_style_rule(data.get("style_slug", "swiss-motion"))
+        if not 10 <= int(data.get("target_duration", 30)) <= 120:
+            raise ValueError("Video duration must be between 10 and 120 seconds")
         proj_id = str(uuid.uuid4())
         name = data.get("name") or data.get("topic", "Untitled")[:40]
         base_slug = self._slugify(name)
         slug = f"{base_slug}-{proj_id[:6]}"
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         project_dir = os.path.join(PROJECTS_DIR, slug)
         for sub in ("research", "script", "storyboard", "visuals", "audio", "subtitles", "renders", "final"):
@@ -86,6 +92,9 @@ class ProjectService:
         with open(os.path.join(project_dir, "project.json"), "w", encoding="utf-8") as f:
             json.dump(proj_dict, f, indent=2)
 
+        # Non-secret project-specific preferences live beside the project assets.
+        with open(os.path.join(project_dir, "preferences.json"), "w", encoding="utf-8") as f:
+            json.dump({"source_urls": data.get("source_urls", []), "expressive_voice": data.get("expressive_voice", True)}, f)
         return proj_dict
 
     def get_project(self, project_id: str) -> Optional[Dict[str, Any]]:
@@ -105,23 +114,36 @@ class ProjectService:
         return [self._row_to_dict(r) for r in rows]
 
     def delete_project(self, project_id: str) -> bool:
-        proj = self.get_project(project_id)
-        if not proj:
-            return False
-
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM projects WHERE id = ? OR slug = ?", (project_id, project_id))
-        conn.commit()
-        conn.close()
-
-        project_dir = os.path.join(PROJECTS_DIR, proj["slug"])
-        if os.path.exists(project_dir):
-            shutil.rmtree(project_dir, ignore_errors=True)
-        return True
+        with self._lock:
+            proj = self.get_project(project_id)
+            if not proj:
+                return False
+            if self._active_jobs.get(proj["id"], {}).get("status") == "running":
+                raise ValueError("This video is being produced. Wait until production finishes before deleting it.")
+            slug = proj["slug"]
+            if slug != os.path.basename(slug) or slug in (".", ".."):
+                raise ValueError("Invalid project path")
+            project_dir = Path(PROJECTS_DIR) / slug
+            if project_dir.is_symlink() or project_dir.resolve().parent != Path(PROJECTS_DIR).resolve():
+                raise ValueError("Unsafe project path")
+            # Delete assets first. An I/O failure retains the DB record so cleanup can be retried.
+            if project_dir.exists():
+                shutil.rmtree(project_dir)
+            for asset in Path(OUTPUT_DIR).glob(slug + ".*"):
+                if asset.is_file() or asset.is_symlink():
+                    asset.unlink()
+            conn = get_connection()
+            try:
+                with conn:
+                    conn.execute("DELETE FROM render_jobs WHERE project_id = ?", (proj["id"],))
+                    conn.execute("DELETE FROM projects WHERE id = ?", (proj["id"],))
+            finally:
+                conn.close()
+            self._active_jobs.pop(proj["id"], None)
+            return True
 
     def update_project_status(self, project_id: str, stage: str, progress: int, status: str = "processing", error: str = None):
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute("""
@@ -133,31 +155,39 @@ class ProjectService:
         conn.close()
 
     def get_active_job(self, project_id: str) -> Optional[Dict[str, Any]]:
-        return self._active_jobs.get(project_id)
+        project = self.get_project(project_id)
+        return self._active_jobs.get(project["id"]) if project else None
 
     def start_production(self, project_id: str) -> Dict[str, Any]:
-        proj = self.get_project(project_id)
-        if not proj:
-            raise ValueError(f"Project not found: {project_id}")
+        with self._lock:
+            proj = self.get_project(project_id)
+            if not proj:
+                raise ValueError(f"Project not found: {project_id}")
+            if any(job["status"] == "running" for job in self._active_jobs.values()):
+                raise ValueError("A production is already running. Finish it before starting another video.")
+            ai_service.check_ready()
+            rule = lemo_loader.load_style_rule(proj["style_slug"])
+            if "image-generation" in rule["metadata"].get("needs", []):
+                raise ValueError("This style needs generated image assets. Choose a code-rendered style.")
+            project_id = proj["id"]
+            job_id = str(uuid.uuid4())
+            self._active_jobs[project_id] = {
+                "job_id": job_id, "project_id": project_id, "status": "running", "stage": "starting",
+                "progress": 0, "message": "Checking production prerequisites…",
+                "started_at": datetime.now(timezone.utc).isoformat()}
+            self.update_project_status(project_id, "starting", 0)
+            cfg = ai_service.config()
+            threading.Thread(target=self._production_context, args=(project_id, job_id, cfg), daemon=True).start()
+            return dict(self._active_jobs[project_id])
 
-        job_id = str(uuid.uuid4())
-        self._active_jobs[project_id] = {
-            "job_id": job_id,
-            "project_id": project_id,
-            "status": "running",
-            "stage": "starting",
-            "progress": 0,
-            "message": "Initiating research and visual pipeline...",
-            "started_at": datetime.utcnow().isoformat()
-        }
-
-        thread = threading.Thread(
-            target=self._run_pipeline,
-            args=(project_id, job_id),
-            daemon=True
-        )
-        thread.start()
-        return self._active_jobs[project_id]
+    def _production_context(self, project_id, job_id, cfg):
+        with ai_service.production():
+            from backend.services.ai_service import _snapshot
+            token = _snapshot.set(cfg)
+            try:
+                self._run_pipeline(project_id, job_id)
+            finally:
+                _snapshot.reset(token)
 
     def _run_pipeline(self, project_id: str, job_id: str):
         proj = self.get_project(project_id)
@@ -177,10 +207,15 @@ class ProjectService:
             # -------------------------------------------------------------
             # Stage 0: Local AI Engine & Claude Code Readiness Check
             # -------------------------------------------------------------
-            update_job("init_ai", 3, "Verifying Ollama and Claude Code local environment...")
-            ai_status = ollama_manager.verify_and_initialize(skip_smoke_test=True)
-            if not ai_status.get("ollama_running"):
-                raise RuntimeError(f"Ollama local service unavailable: {ai_status.get('last_error')}")
+            update_job("init_ai", 3, "Checking Claude Code, model provider and rendering tools…")
+            ai_service.check_ready()
+            preferences_path = os.path.join(project_dir, "preferences.json")
+            preferences = {}
+            if os.path.exists(preferences_path):
+                with open(preferences_path, encoding="utf-8") as f:
+                    preferences = json.load(f)
+            with open(os.path.join(project_dir, "generation.json"), "w", encoding="utf-8") as f:
+                json.dump(ai_service.public_config(), f, indent=2)
 
             # -------------------------------------------------------------
             # Stage 1: Internet Research Engine & Fact Gathering
@@ -188,25 +223,13 @@ class ProjectService:
             update_job("research", 8, f"Executing web research for '{proj['topic']}'...")
             research_dir = os.path.join(project_dir, "research")
 
+            def research_prog(sub_st, pct, msg):
+                update_job("research", int(5 + pct * .15), msg)
+            sources = preferences.get("source_urls", [])
             if proj.get("mode") == "github" and proj.get("source_url"):
-                analysis = github_service.analyze_repository(proj["source_url"], research_dir)
-                research_brief = {
-                    "topic": proj["topic"],
-                    "summary": analysis.get("analysis", ""),
-                    "key_findings": analysis.get("files_sample", []),
-                    "sources": [{"title": "GitHub Repository", "url": proj["source_url"], "credibility": "authoritative"}]
-                }
-                with open(os.path.join(research_dir, "research.json"), "w", encoding="utf-8") as f:
-                    json.dump(research_brief, f, indent=2)
-            else:
-                def research_prog(sub_st, pct, msg):
-                    update_job("research", int(5 + pct * 0.15), msg)
-
-                research_brief = research_service.research_topic(
-                    topic=proj["topic"],
-                    out_dir=research_dir,
-                    progress_cb=research_prog
-                )
+                sources = [proj["source_url"]] + sources
+            research_brief = research_service.research_topic(
+                topic=proj["topic"], out_dir=research_dir, progress_cb=research_prog, source_urls=sources)
 
             # -------------------------------------------------------------
             # Stage 2: Story Treatment (DIRECTOR.md principles & 3s Hook)
@@ -251,7 +274,8 @@ class ProjectService:
                 scenes=scenes,
                 out_dir=audio_dir,
                 voice=proj["voice"],
-                speed=proj["speaking_speed"]
+                speed=proj["speaking_speed"], language=proj["language"],
+                target_duration=proj["target_duration"], expressive=preferences.get("expressive_voice", True)
             )
             with open(os.path.join(project_dir, "audio", "timing.json"), "w", encoding="utf-8") as f:
                 json.dump(narration_timing, f, indent=2)
@@ -290,20 +314,26 @@ class ProjectService:
                 subtitles_enabled=proj["subtitles_enabled"]
             )
 
+            visual_check = render_service.inspect_scenes(html_scene_path, os.path.join(project_dir, "renders", "style_frames"))
+            with open(os.path.join(project_dir, "renders", "visual_check.json"), "w", encoding="utf-8") as f:
+                json.dump(visual_check, f, indent=2)
+
             # -------------------------------------------------------------
             # Stage 7: Multi-Stem Procedural Audio Production
             # -------------------------------------------------------------
             update_job("audio_mix", 62, "Composing original score, multi-track stems, and event-based SFX...")
-            actual_dur = max(sc["end_time"] for sc in narration_timing) + 0.8 if narration_timing else float(proj["target_duration"])
+            actual_dur = float(proj["target_duration"])
             audio_prod = audio_service.build_multi_stem_production(
                 duration_sec=actual_dur,
                 project_dir=project_dir,
                 project_slug=slug,
                 narration_scenes=narration_timing,
-                scenes_meta=storyboard.get("scenes", []),
+                scenes_meta=[{**sc, "start": narration_timing[i]["start_time"],
+                    "end": narration_timing[i+1]["start_time"] if i+1 < len(narration_timing) else actual_dur}
+                    for i, sc in enumerate(storyboard["scenes"])],
                 music_enabled=proj["music_enabled"],
                 sfx_enabled=proj["sfx_enabled"],
-                topic=proj.get("topic", "")
+                topic=proj.get("topic", ""), music_direction=storyboard.get("music_direction", {})
             )
             mix_wav_path = audio_prod["mix_path"]
 
@@ -356,10 +386,14 @@ class ProjectService:
                 final_mp4_path,
                 target_dur=proj["target_duration"],
                 storyboard=storyboard,
-                project_dir=project_dir
+                project_dir=project_dir, expected_dimensions=(w, h), expected_fps=fps
             )
             with open(os.path.join(project_dir, "renders", "qc.json"), "w", encoding="utf-8") as f:
                 json.dump(qc_results, f, indent=2)
+
+            if not qc_results.get("passed"):
+                failed = [name for name, value in qc_results.get("checks", {}).items() if value is False]
+                raise RuntimeError("Quality checks failed: " + ", ".join(failed) + ". Inspect qc.json; video was not published.")
 
             # Export to global output folder
             global_output_mp4 = os.path.join(OUTPUT_DIR, f"{slug}.mp4")

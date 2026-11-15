@@ -3,7 +3,9 @@ import json
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Depends, Query, Response, status
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from typing import Literal
+from backend.services.ai_service import ai_service
 
 from backend.services.ollama_service import ollama_service
 from backend.services.ollama_manager import ollama_manager
@@ -26,18 +28,30 @@ class ProjectCreateRequest(BaseModel):
     topic: str = Field(min_length=1, max_length=2000)
     mode: str = "topic" # topic or github
     source_url: Optional[str] = None
-    target_duration: int = 45 # 15, 30, 45, 60, 90, 120
-    aspect_ratio: str = "9:16" # 9:16, 16:9, 1:1, 4:5
+    source_urls: List[str] = Field(default_factory=list, max_length=6)
+    expressive_voice: bool = True
+    target_duration: int = Field(default=45, ge=10, le=120) # # 15, 30, 45, 60, 90, 120
+    aspect_ratio: Literal["9:16", "16:9", "1:1", "4:5"] = "9:16" # 9:16, 16:9, 1:1, 4:5
     resolution: str = "1080x1920"
-    fps: int = 24
-    language: str = "en"
+    fps: int = Field(default=24, ge=20, le=30)
+    language: Literal["en", "en-us", "en-gb", "zh", "hi", "es", "fr", "it", "ja", "pt"] = "en"
     voice: str = "af_bella"
-    speaking_speed: float = 1.0
+    speaking_speed: float = Field(default=1.0, ge=.85, le=1.2)
     style_slug: str = "swiss-motion"
     music_enabled: bool = True
     sfx_enabled: bool = True
     subtitles_enabled: bool = True
     draft_render: bool = False
+
+    @field_validator("source_urls")
+    @classmethod
+    def validate_urls(cls, urls):
+        from urllib.parse import urlsplit
+        for url in urls:
+            parsed = urlsplit(url)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+                raise ValueError("Sources must be HTTP(S) article URLs without credentials")
+        return urls
 
 class GitHubAnalyzeRequest(BaseModel):
     url: str
@@ -50,14 +64,21 @@ class StoryboardUpdateRequest(BaseModel):
 
 # --- System & Diagnostics ---
 @router.get("/health")
-async def health():
-    ollama_stat = await check_ollama()
+def health():
+    cfg = ai_service.public_config()
+    try:
+        ai_service.check_ready()
+        ai_status = {**cfg, "ready": True}
+    except RuntimeError as exc:
+        ai_status = {**cfg, "ready": False, "last_error": str(exc)}
+    ollama_stat = {"status": "online" if cfg["provider"] == "ollama" and ai_status["ready"] else "offline"}
     ffmpeg_stat = check_ffmpeg()
     gpu_stat = check_gpu()
     voices = tts_service.get_voices()
 
     return {
-        "status": "ok",
+        "status": "ok" if ai_status["ready"] else "degraded",
+        "ai": ai_status,
         "ollama": ollama_stat,
         "ffmpeg": ffmpeg_stat,
         "gpu": gpu_stat,
@@ -69,13 +90,54 @@ async def health():
         "styles_count": len(style_service.list_styles())
     }
 
+class AISettingsRequest(BaseModel):
+    provider: Literal["ollama", "freellmapi"]
+    endpoint: str = Field(max_length=500)
+    planning_model: str = Field(min_length=1, max_length=200)
+    coding_model: str = Field(min_length=1, max_length=200)
+    api_key_env: str = Field(default="FREELLMAPI_API_KEY", max_length=100)
+    timeout_seconds: int = Field(default=180, ge=30, le=600)
+
+@router.get("/ai/settings")
+def ai_settings():
+    return ai_service.public_config()
+
+@router.put("/ai/settings")
+def update_ai_settings(request: AISettingsRequest):
+    try:
+        with project_service._lock:
+            if any(j["status"] == "running" for j in project_service._active_jobs.values()):
+                raise ValueError("Wait for active video production to finish before switching models.")
+            return ai_service.update(request.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+class SessionCredential(BaseModel):
+    api_key: str = Field(min_length=1, max_length=1000, repr=False)
+
+@router.post("/ai/credential")
+def set_session_credential(request: SessionCredential):
+    with project_service._lock:
+        if any(j["status"] == "running" for j in project_service._active_jobs.values()):
+            raise HTTPException(status_code=409, detail="Wait for production to finish before changing credentials.")
+        ai_service._session_key = request.api_key
+    return {"configured": True, "storage": "backend process memory only"}
+
 @router.get("/ai/status")
 def ai_status():
-    return ollama_manager.get_status()
+    try:
+        return {**ai_service.check_ready(), "ready": True}
+    except RuntimeError as exc:
+        return {**ai_service.public_config(), "ready": False, "last_error": str(exc)}
 
 @router.post("/ai/initialize")
 def ai_initialize():
-    return ollama_manager.verify_and_initialize()
+    try:
+        ai_service.check_ready()
+        response = ai_service.generate("Reply with exactly READY.")
+        return {"ready": bool(response.strip()), "engine": "Claude Code"}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
 
 @router.get("/models")
 def models():
@@ -163,10 +225,15 @@ def get_project(project_id: str):
 
 @router.delete("/projects/{project_id}")
 def delete_project(project_id: str):
-    success = project_service.delete_project(project_id)
+    try:
+        success = project_service.delete_project(project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except OSError:
+        raise HTTPException(status_code=500, detail="Some files could not be removed. Close any video player using them, then retry deletion.")
     if not success:
         raise HTTPException(status_code=404, detail="Project not found")
-    return {"success": True, "message": "Project deleted"}
+    return {"success": True, "message": "Video, exports, workspace, research, audio and render jobs deleted"}
 
 @router.post("/projects/{project_id}/produce")
 def produce_video(project_id: str):

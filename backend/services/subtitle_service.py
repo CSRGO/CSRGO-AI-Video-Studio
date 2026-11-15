@@ -1,40 +1,26 @@
-import os
-from typing import List, Dict, Any
+from pathlib import Path
+
 
 class SubtitleService:
-    def __init__(self):
-        pass
+    def _format_timestamp(self, seconds):
+        millis = max(0, round(seconds * 1000))
+        hours, millis = divmod(millis, 3600000)
+        minutes, millis = divmod(millis, 60000)
+        seconds, millis = divmod(millis, 1000)
+        return f'{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}'
 
-    def _format_timestamp(self, seconds: float) -> str:
-        """Converts float seconds to SRT timestamp: HH:MM:SS,mmm"""
-        hrs = int(seconds // 3600)
-        mins = int((seconds % 3600) // 60)
-        secs = int(seconds % 60)
-        millis = int(round((seconds - int(seconds)) * 1000))
-        return f"{hrs:02d}:{mins:02d}:{secs:02d},{millis:03d}"
-
-    def generate_srt(self, narration_timing: List[Dict[str, Any]], output_srt_path: str) -> str:
-        """Generates an SRT subtitle file from scene narration timings."""
-        os.makedirs(os.path.dirname(output_srt_path), exist_ok=True)
-        srt_lines = []
-
-        for i, sc in enumerate(narration_timing, 1):
-            start_t = sc.get("start_time", 0.0)
-            end_t = sc.get("end_time", start_t + 2.0)
-            text = sc.get("narration", "").strip()
-
-            if not text:
-                continue
-
-            srt_lines.append(str(i))
-            srt_lines.append(f"{self._format_timestamp(start_t)} --> {self._format_timestamp(end_t)}")
-            srt_lines.append(text)
-            srt_lines.append("") # Blank line separator
-
-        with open(output_srt_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(srt_lines))
-
-        return output_srt_path
+    def generate_srt(self, narration_timing, output_srt_path):
+        path = Path(output_srt_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        blocks = []
+        for scene in narration_timing:
+            words = scene.get('narration', '').split()
+            chunks = [' '.join(words[i:i+7]) for i in range(0, len(words), 7)]
+            for idx, text in enumerate(chunks):
+                start = scene['start_time'] + idx / len(chunks) * (scene['end_time'] - scene['start_time'])
+                end = scene['start_time'] + (idx + 1) / len(chunks) * (scene['end_time'] - scene['start_time'])
+                blocks.append(f'{len(blocks)+1}\n{self._format_timestamp(start)} --> {self._format_timestamp(end)}\n{text}\n')
+        path.write_text('\n'.join(blocks), encoding='utf-8')
+        return str(path)
 
 subtitle_service = SubtitleService()
-
