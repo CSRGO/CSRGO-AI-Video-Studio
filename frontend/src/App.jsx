@@ -44,6 +44,8 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const [deleting, setDeleting] = useState(null);
   const [sourceText, setSourceText] = useState('');
+  const [recoverySources, setRecoverySources] = useState('');
+  const [researchDiagnostics, setResearchDiagnostics] = useState(null);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState('');
   const [copiedNotification, setCopiedNotification] = useState(false);
@@ -97,11 +99,18 @@ export default function App() {
   // Load project details when viewing a specific project
   async function loadProjectDetails(projId) {
     try {
-      const [resR, resT, resS] = await Promise.all([
+      const [resR, resT, resS, resInputs] = await Promise.all([
         fetch(`${API}/api/projects/${projId}/research`).catch(() => null),
         fetch(`${API}/api/projects/${projId}/treatment`).catch(() => null),
-        fetch(`${API}/api/projects/${projId}/storyboard`).catch(() => null)
+        fetch(`${API}/api/projects/${projId}/storyboard`).catch(() => null),
+        fetch(`${API}/api/projects/${projId}/research-inputs`).catch(() => null)
       ]);
+
+      if (resInputs?.ok) {
+        const inputs = await resInputs.json();
+        setRecoverySources((inputs.source_urls || []).join('\n'));
+        setResearchDiagnostics(inputs.diagnostics);
+      } else { setRecoverySources(''); setResearchDiagnostics(null); }
 
       if (resR && resR.ok) setProjectResearch(await resR.json());
       else setProjectResearch(null);
@@ -211,9 +220,16 @@ export default function App() {
     }
   }
 
-  async function retryProduction() {
+  async function retryProduction(saveSources = false) {
     setCreating(true); setNotice('');
     try {
+      if (saveSources) {
+        const update = await fetch(`${API}/api/projects/${activeProject.id}/research-inputs`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ source_urls: recoverySources.split(/\n/).map(s => s.trim()).filter(Boolean) })
+        });
+        if (!update.ok) { const error = await update.json(); throw new Error(typeof error.detail === 'string' ? error.detail : 'Enter up to six valid HTTP(S) article URLs.'); }
+      }
       const res = await fetch(`${API}/api/projects/${activeProject.id}/produce`, { method: 'POST' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Could not start production');
@@ -790,9 +806,24 @@ export default function App() {
                     {activeJob?.message || activeProject.error_message || 'Processing workflow...'}
                   </div>
 
-                  {['draft', 'failed'].includes(activeProject.status) && <button className="primary-button" disabled={creating} onClick={retryProduction} style={{ marginTop: 16 }}>
+                  {['draft', 'failed'].includes(activeProject.status) && <button className="primary-button" disabled={creating} onClick={() => retryProduction()} style={{ marginTop: 16 }}>
                     {creating ? 'Starting…' : activeProject.status === 'failed' ? 'Retry production' : 'Start production'}
                   </button>}
+
+                  {activeProject.status === 'failed' && /research sources|research|article|search/i.test(activeProject.error_message || '') && <section className="research-recovery">
+                    <h3>Research recovery</h3>
+                    <p>Your model connection and web search are separate. Keep Ollama selected; search providers may require verification or be blocked by a firewall.</p>
+                    <label className="field-label">Trusted article URLs (one per line, up to six)
+                      <textarea rows={3} value={recoverySources} onChange={e => setRecoverySources(e.target.value)} placeholder="Paste links to reporting or official updates about the same incident and date." />
+                    </label>
+                    <button className="primary-button" style={{ marginTop: 12 }} disabled={creating || !recoverySources.trim()} onClick={() => retryProduction(true)}>
+                      {creating ? 'Starting…' : 'Save sources & retry'}
+                    </button>
+                    {researchDiagnostics && <details style={{ marginTop: 14 }}><summary>Search diagnostics</summary>
+                      <ul>{(researchDiagnostics.search_attempts || []).map((a, i) => <li key={i}>{a.provider}: {a.reason || `${a.results} results`}</li>)}</ul>
+                      {(researchDiagnostics.warnings || []).map((warning, i) => <p key={i}>{warning}</p>)}
+                    </details>}
+                  </section>}
 
                   {/* Visual Pipeline Stages */}
                   <div className="stages-flow">

@@ -967,3 +967,6 @@ button:focus-visible{outline:3px solid #9282ed;outline-offset:3px}button:disable
 .mode-tabs button.selected{color:#5b44bf}.mode-tabs button{color:#62708a}.qc-item{color:#137655}
 .search-input{background:#fff;color:#17213a;border-color:#ccd4e3}.generation-error{background:#fff0f2;color:#a12d42;border:1px solid #edc7d0;padding:14px;border-radius:10px;margin-bottom:16px}
 @media(max-width:520px){.switches-grid{grid-template-columns:1fr}.create-footer{align-items:stretch;flex-direction:column}.stages-flow{overflow-x:auto;gap:12px}.project-grid{grid-template-columns:minmax(0,1fr)}}
+.research-recovery{margin:20px 0;padding:20px;background:#f8f9fc;border:1px solid #dce1ed;border-radius:12px;color:#344360}
+.research-recovery p,.research-recovery li{font-size:13px;line-height:1.6}.research-recovery summary{cursor:pointer;font-weight:600}
+@media(max-width:520px){.mode-tabs{max-width:100%;overflow-x:auto}.mode-tabs button{flex:0 0 auto}.pipeline-card{padding:18px}.stages-flow{max-width:100%}.stage-step{flex:0 0 64px}.research-recovery{padding:14px;overflow-wrap:anywhere}}

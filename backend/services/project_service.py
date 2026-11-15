@@ -142,6 +142,26 @@ class ProjectService:
             self._active_jobs.pop(proj["id"], None)
             return True
 
+    def research_inputs(self, project_id, source_urls=None):
+        with self._lock:
+            project = self.get_project(project_id)
+            if not project:
+                raise ValueError("Project not found")
+            if source_urls is not None and self._active_jobs.get(project["id"], {}).get("status") == "running":
+                raise ValueError("Wait for production to finish before editing research inputs.")
+            folder = Path(PROJECTS_DIR) / project["slug"]
+            path = folder / "preferences.json"
+            preferences = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            if source_urls is not None:
+                preferences["source_urls"] = source_urls
+                folder.mkdir(parents=True, exist_ok=True)
+                temporary = path.with_suffix(".json.tmp")
+                temporary.write_text(json.dumps(preferences, indent=2), encoding="utf-8")
+                temporary.replace(path)
+            diagnostics_path = folder / "research" / "research_diagnostics.json"
+            diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8")) if diagnostics_path.exists() else None
+            return {"source_urls": preferences.get("source_urls", []), "diagnostics": diagnostics}
+
     def update_project_status(self, project_id: str, stage: str, progress: int, status: str = "processing", error: str = None):
         now = datetime.now(timezone.utc).isoformat()
         conn = get_connection()

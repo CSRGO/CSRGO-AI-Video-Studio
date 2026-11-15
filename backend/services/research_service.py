@@ -6,6 +6,7 @@ import json
 import os
 import re
 import socket
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
@@ -35,30 +36,83 @@ class ResearchService:
             'event_type': 'User topic', 'forbidden_historical_markers': [],
         }
 
-    def search_web(self, query, max_results=6):
-        with httpx.Client(timeout=20, headers=HEADERS) as client:
-            response = client.get('https://html.duckduckgo.com/html/', params={'q': query})
-            response.raise_for_status()
-        if 'anomaly' in response.text.lower() or response.status_code == 202:
-            raise RuntimeError('Search provider requested a challenge. Add trusted source URLs to the project instead.')
+    def _failure_reason(self, exc):
+        if isinstance(exc, httpx.HTTPStatusError):
+            return f"HTTP {exc.response.status_code} from the provider"
+        if isinstance(exc, httpx.ProxyError):
+            return "proxy or network policy denied the connection"
+        if isinstance(exc, httpx.TimeoutException):
+            return "connection timed out"
+        if isinstance(exc, httpx.ConnectError):
+            return "connection failed; check DNS, firewall and TLS trust"
+        if isinstance(exc, httpx.HTTPError):
+            return "network request failed"
+        # Our own messages contain no response bodies, credentials or proxy details.
+        if isinstance(exc, RuntimeError):
+            return str(exc)
+        return type(exc).__name__
+
+    def _duckduckgo_search(self, client, query, limit):
+        response = client.get('https://html.duckduckgo.com/html/', params={'q': query})
+        response.raise_for_status()
+        if response.status_code == 202 or any(marker in response.text.lower() for marker in
+                ('id="challenge-form"', "id='challenge-form'", 'anomaly-modal', 'anomaly.js')):
+            raise RuntimeError('verification challenge; interactive browser access is required by DuckDuckGo')
         results = []
-        # result__a carries the article URL; result__url is often only display text.
         for match in re.finditer(r'<a\b[^>]*class=["\'][^"\']*result__a[^"\']*["\'][^>]*>(.*?)</a>', response.text, re.S):
-            anchor = match.group(0)
-            href = re.search(r'href=["\'](.*?)["\']', anchor)
+            href = re.search(r'href=["\'](.*?)["\']', match.group(0))
             if not href:
                 continue
             url = html.unescape(href.group(1))
             if 'uddg=' in url:
                 url = parse_qs(urlsplit(url).query).get('uddg', [''])[0]
             url = urljoin('https://html.duckduckgo.com', url)
-            if urlsplit(url).hostname in ('duckduckgo.com', 'html.duckduckgo.com'):
+            if urlsplit(url).scheme not in ('http', 'https') or urlsplit(url).hostname in ('duckduckgo.com', 'html.duckduckgo.com'):
                 continue
             results.append({'title': html.unescape(re.sub('<[^>]+>', '', match.group(1))).strip(),
-                            'url': url, 'snippet': '', 'credibility': 'unassessed'})
-            if len(results) >= max_results:
+                            'url': url, 'snippet': '', 'credibility': 'unassessed', 'discovered_via': 'DuckDuckGo'})
+            if len(results) >= limit:
                 break
         return results
+
+    def _bing_search(self, client, query, limit):
+        response = client.get('https://www.bing.com/search', params={'q': query, 'format': 'rss'})
+        response.raise_for_status()
+        # This is an independent public RSS search endpoint, not a CAPTCHA bypass.
+        # Parse article URLs, not search snippets as factual evidence.
+        try:
+            feed = ET.fromstring(response.text)
+        except ET.ParseError:
+            raise RuntimeError('RSS search returned an unreadable response or verification page') from None
+        results = []
+        for item in feed.findall('./channel/item'):
+            url = (item.findtext('link') or '').strip()
+            host = urlsplit(url).hostname or ''
+            if urlsplit(url).scheme not in ('http', 'https') or host == 'bing.com' or host.endswith('.bing.com'):
+                continue
+            results.append({'title': item.findtext('title') or url, 'url': url,
+                            'snippet': re.sub('<[^>]+>', '', item.findtext('description') or ''),
+                            'credibility': 'unassessed', 'discovered_via': 'Bing RSS'})
+            if len(results) >= limit:
+                break
+        return results
+
+    def search_web(self, query, max_results=6, diagnostics=None):
+        attempts = diagnostics if diagnostics is not None else []
+        failures = []
+        with httpx.Client(timeout=15, headers=HEADERS, follow_redirects=True, max_redirects=5) as client:
+            for name, search in [('DuckDuckGo', self._duckduckgo_search), ('Bing RSS', self._bing_search)]:
+                try:
+                    results = search(client, query, max_results)
+                    if not results:
+                        raise RuntimeError('no article results returned')
+                    attempts.append({'provider': name, 'query': query, 'status': 'ok', 'results': len(results)})
+                    return results
+                except (httpx.HTTPError, RuntimeError) as exc:
+                    reason = self._failure_reason(exc)
+                    failures.append(f'{name}: {reason}')
+                    attempts.append({'provider': name, 'query': query, 'status': 'failed', 'reason': reason})
+        raise RuntimeError('; '.join(failures))
 
     def fetch_page_article(self, url):
         # Validate redirects too; never allow a public page to redirect into localhost.
@@ -118,14 +172,14 @@ Return JSON: {{"queries":["three focused queries including a primary-source quer
         if not queries or not all(isinstance(q, str) for q in queries):
             raise RuntimeError('Research plan did not contain valid search queries.')
         candidates = [{'url': u, 'title': u, 'credibility': 'user_supplied'} for u in (source_urls or [])]
-        errors = []
+        errors, search_attempts = [], []
         update('searching_web', 25, 'Searching for original sources and corroborating coverage…')
         if not candidates:
             for query in queries:
                 try:
-                    candidates.extend(self.search_web(query, max_results=4))
+                    candidates.extend(self.search_web(query, max_results=4, diagnostics=search_attempts))
                 except Exception as exc:
-                    errors.append(f'Search unavailable: {type(exc).__name__}')
+                    errors.append(self._failure_reason(exc))
         sources, seen = [], set()
         for candidate in candidates:
             if candidate['url'] in seen:
@@ -134,15 +188,26 @@ Return JSON: {{"queries":["three focused queries including a primary-source quer
             try:
                 text = self.fetch_page_article(candidate['url'])
                 if len(text) < 150:
+                    errors.append(f"{urlsplit(candidate['url']).hostname}: article had too little readable text")
                     continue
                 sources.append({**candidate, 'source_id': f'SRC-{len(sources)+1:02d}',
                                 'extracted_text': text, 'retrieved_at': datetime.now(timezone.utc).isoformat()})
             except Exception as exc:
-                errors.append(f"Could not read {urlsplit(candidate['url']).hostname}: {type(exc).__name__}")
+                errors.append(f"Could not read {urlsplit(candidate['url']).hostname}: {self._failure_reason(exc)}")
             if len(sources) == 6:
                 break
+        diagnostics = {'topic': topic, 'search_attempts': search_attempts,
+                       'source_attempts': len(seen), 'readable_sources': len(sources), 'warnings': errors,
+                       'retrieved_at': datetime.now(timezone.utc).isoformat()}
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(out_dir, 'research_diagnostics.json'), 'w', encoding='utf-8') as f:
+                json.dump(diagnostics, f, indent=2, ensure_ascii=False)
         if not sources:
-            raise RuntimeError('No readable research sources. Check Internet/search access or add trusted article URLs. ' + '; '.join(errors[:3]))
+            reasons = list(dict.fromkeys(errors))[:3]
+            raise RuntimeError('No readable research sources. Ollama is the language model; web research needs separate Internet access. '
+                + (' '.join(reasons) if reasons else 'Search returned no readable articles.')
+                + ' Add trusted article URLs in Research recovery and retry this project; you can keep Ollama selected.')
         update('extracting_facts', 60, 'Linking each factual claim to exact passages in retrieved articles…')
         source_context = json.dumps(sources, ensure_ascii=False)
         prompt = f'''Research the exact topic: {topic}

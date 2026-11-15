@@ -196,6 +196,17 @@ class ProjectTests(unittest.TestCase):
         with get_connection() as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM render_jobs').fetchone()[0], 0)
 
+    def test_research_recovery_preserves_project_and_other_preferences(self):
+        project = self.service.create_project({'topic': 'Email', 'expressive_voice': False})
+        inputs = self.service.research_inputs(project['slug'], ['https://example.com/report'])
+        self.assertEqual(inputs['source_urls'], ['https://example.com/report'])
+        self.assertEqual(self.service.research_inputs(project['id'])['source_urls'], inputs['source_urls'])
+        preferences = json.loads((self.projects / project['slug'] / 'preferences.json').read_text())
+        self.assertFalse(preferences['expressive_voice'])
+        self.service._active_jobs[project['id']] = {'status': 'running'}
+        with self.assertRaisesRegex(ValueError, 'production to finish'):
+            self.service.research_inputs(project['id'], [])
+
     def test_delete_active_job_rejected(self):
         project = self.service.create_project({'topic': 'Email'})
         self.service._active_jobs[project['id']] = {'status': 'running'}

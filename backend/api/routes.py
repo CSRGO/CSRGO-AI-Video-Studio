@@ -53,6 +53,14 @@ class ProjectCreateRequest(BaseModel):
                 raise ValueError("Sources must be HTTP(S) article URLs without credentials")
         return urls
 
+class ResearchInputsRequest(BaseModel):
+    source_urls: List[str] = Field(default_factory=list, max_length=6)
+
+    @field_validator("source_urls")
+    @classmethod
+    def validate_urls(cls, urls):
+        return ProjectCreateRequest.validate_urls(urls)
+
 class GitHubAnalyzeRequest(BaseModel):
     url: str
 
@@ -259,6 +267,20 @@ def get_project_status(project_id: str):
         "output_video_path": proj["output_video_path"],
         "job": job
     }
+
+@router.get("/projects/{project_id}/research-inputs")
+def get_research_inputs(project_id: str):
+    try:
+        return project_service.research_inputs(project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+@router.put("/projects/{project_id}/research-inputs")
+def update_research_inputs(project_id: str, request: ResearchInputsRequest):
+    try:
+        return project_service.research_inputs(project_id, request.source_urls)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 @router.get("/projects/{project_id}/research")
 def get_project_research(project_id: str):

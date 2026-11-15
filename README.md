@@ -64,6 +64,12 @@ The pipeline:
 
 Caption chunks are timed to measured scene speech, not word-level forced alignment. Visual quality and factual nuance still need human review before posting. The app currently supports code-rendered Canvas interpretations of Lemo styles; full 3D and image-dependent media need additional render/asset engines.
 
+## Recover a failed research step
+
+Ollama supplies model inference, not web access. Automatic research tries DuckDuckGo, then an independent Bing RSS search endpoint if the first provider fails or returns no results. Verification challenges, HTTP errors, proxy denials and timeouts are reported separately; ordinary articles containing the word “anomaly” are not treated as challenge pages.
+
+If research still fails, open the project in **Production & Inspect → Research recovery**, paste trusted article URLs about the same incident/date, and click **Save sources & retry**. The existing project and selected model are preserved. Direct article URLs skip search engines but still require Internet access to read the articles. Provider diagnostics are saved in the project's `research/research_diagnostics.json` and shown in the recovery panel. Restricted environments must allow `html.duckduckgo.com`, `www.bing.com`, and the article hosts they need to read.
+
 ## Files and cleanup
 
 Each project keeps research, treatment, storyboard, generated scene code, speech, audio stems, captions, test frames and final export under `projects/<slug>`. Successful exports are also copied to `output`.
