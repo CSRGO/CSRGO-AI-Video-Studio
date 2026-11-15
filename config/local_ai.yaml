@@ -1,0 +1,25 @@
+ai:
+  provider: ollama
+  endpoint: http://127.0.0.1:11434
+  local_only: true
+
+  planning_model: qwen3:1.7b
+  coding_model: qwen2.5-coder:3b
+
+claude_code:
+  enabled: true
+  mandatory: true
+  execution_mode: subprocess
+  auto_initialize: true
+  auto_repair: true
+  max_repair_attempts: 3
+  timeout_seconds: 45
+  executable: claude
+
+production:
+  use_selected_lemo_skill: true
+  dynamic_scene_generation: true
+  narration_driven_timeline: true
+  scene_specific_audio: true
+  visual_quality_checks: true
+
