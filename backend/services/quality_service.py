@@ -223,6 +223,36 @@ class QualityService:
         corr = np.corrcoef(voice[:n][mask], exported[:n][mask])[0, 1]
         return bool(np.isfinite(corr) and corr > .45)
 
+    def inspect_scene_motion(self, video_path, timing, duration, output_dir):
+        """Validate decoded native-engine frames, excluding the caption band."""
+        import io
+        os.makedirs(output_dir, exist_ok=True)
+        report, middle = [], []
+        for i, scene in enumerate(timing):
+            end = timing[i+1]['start_time'] if i+1 < len(timing) else duration
+            frames = []
+            for j, progress in enumerate((.1, .5, .9)):
+                timestamp = scene['start_time'] + progress * (end - scene['start_time'])
+                result = subprocess.run(['ffmpeg','-v','error','-ss',str(timestamp),'-i',video_path,
+                    '-frames:v','1','-f','image2pipe','-vcodec','png','pipe:1'],capture_output=True,timeout=30)
+                if result.returncode or not result.stdout:
+                    raise RuntimeError('Could not inspect rendered scene frames.')
+                image = Image.open(io.BytesIO(result.stdout)).convert('RGB')
+                image.save(os.path.join(output_dir, f'scene_{i+1:02d}_{j}.png'))
+                image = image.crop((0, 0, image.width, round(image.height * .76))).resize((160, 160))
+                array = np.asarray(image, dtype=float)
+                if array.std() < 5:
+                    raise RuntimeError(f'Rendered scene {i+1} is blank.')
+                frames.append(array)
+            differences = [float(np.mean(np.abs(a-b))) for a,b in zip(frames,frames[1:])]
+            if max(differences) < .5:
+                raise RuntimeError(f'Rendered scene {i+1} has no measurable animation.')
+            middle.append(frames[1])
+            report.append({'scene':i+1,'frame_differences':differences})
+        if not report or (len(middle)>1 and all(np.mean(np.abs(middle[0]-frame))<.5 for frame in middle[1:])):
+            raise RuntimeError('Rendered scenes are empty or identical.')
+        return {'passed':True,'scenes':report}
+
     def run_qc_suite(
         self,
         video_path: str,

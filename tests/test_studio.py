@@ -203,6 +203,9 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(self.service.research_inputs(project['id'])['source_urls'], inputs['source_urls'])
         preferences = json.loads((self.projects / project['slug'] / 'preferences.json').read_text())
         self.assertFalse(preferences['expressive_voice'])
+        updated = self.service.research_inputs(project['id'], render_engine='remotion')
+        self.assertEqual(updated['source_urls'], ['https://example.com/report'])
+        self.assertEqual(self.service.get_project(project['id'])['render_engine'], 'remotion')
         self.service._active_jobs[project['id']] = {'status': 'running'}
         with self.assertRaisesRegex(ValueError, 'production to finish'):
             self.service.research_inputs(project['id'], [])

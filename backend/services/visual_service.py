@@ -11,7 +11,7 @@ class VisualService:
         if aspect_ratio not in dimensions:
             raise ValueError('Unsupported aspect ratio')
         w, h = dimensions[aspect_ratio]
-        return (w // 2, h // 2) if draft else (w, h)
+        return (round(w / 4) * 2, round(h / 4) * 2) if draft else (w, h)
 
     def generate_html_scene(self, storyboard, narration_timing, style_slug, aspect_ratio,
                             output_html_path, subtitles_enabled=True):

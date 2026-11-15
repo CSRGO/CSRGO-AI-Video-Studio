@@ -50,12 +50,16 @@ echo [5/6] Verifying / downloading Kokoro TTS model weights...
 echo [6/6] Installing frontend dependencies...
 if exist "frontend" (
     cd frontend
-    call npm.cmd install
+    call npm.cmd ci
     cd ..
 )
 
 echo.
 echo ===================================================
+echo Installing native video renderers (Node 22+)...
+call npm.cmd ci --prefix renderer
+if errorlevel 1 exit /b 1
+
 echo     VERIFYING INSTALLATION & SUBSYSTEMS
 echo ===================================================
 .\.venv\Scripts\python.exe verify_installation.py

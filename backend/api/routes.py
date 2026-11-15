@@ -30,6 +30,7 @@ class ProjectCreateRequest(BaseModel):
     source_url: Optional[str] = None
     source_urls: List[str] = Field(default_factory=list, max_length=6)
     expressive_voice: bool = True
+    render_engine: Literal["remotion", "hyperframes", "canvas"] = "remotion"
     target_duration: int = Field(default=45, ge=10, le=120) # # 15, 30, 45, 60, 90, 120
     aspect_ratio: Literal["9:16", "16:9", "1:1", "4:5"] = "9:16" # 9:16, 16:9, 1:1, 4:5
     resolution: str = "1080x1920"
@@ -54,12 +55,13 @@ class ProjectCreateRequest(BaseModel):
         return urls
 
 class ResearchInputsRequest(BaseModel):
-    source_urls: List[str] = Field(default_factory=list, max_length=6)
+    source_urls: Optional[List[str]] = Field(default=None, max_length=6)
+    render_engine: Optional[Literal["remotion", "hyperframes", "canvas"]] = None
 
     @field_validator("source_urls")
     @classmethod
     def validate_urls(cls, urls):
-        return ProjectCreateRequest.validate_urls(urls)
+        return ProjectCreateRequest.validate_urls(urls) if urls is not None else None
 
 class GitHubAnalyzeRequest(BaseModel):
     url: str
@@ -278,7 +280,7 @@ def get_research_inputs(project_id: str):
 @router.put("/projects/{project_id}/research-inputs")
 def update_research_inputs(project_id: str, request: ResearchInputsRequest):
     try:
-        return project_service.research_inputs(project_id, request.source_urls)
+        return project_service.research_inputs(project_id, request.source_urls, request.render_engine)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 

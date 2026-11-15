@@ -10,6 +10,7 @@ from typing import Dict, Any, List, Optional
 from backend.database.db import get_connection
 from backend.services.ai_service import ai_service
 from backend.services.lemo_loader import lemo_loader
+from backend.services.framework_service import framework_service
 from pathlib import Path
 from backend.services.claude_animation_worker import claude_animation_worker
 from backend.services.research_service import research_service
@@ -44,6 +45,8 @@ class ProjectService:
         d["sfx_enabled"] = bool(d.get("sfx_enabled", 1))
         d["subtitles_enabled"] = bool(d.get("subtitles_enabled", 1))
         d["draft_render"] = bool(d.get("draft_render", 0))
+        preferences = Path(PROJECTS_DIR) / d["slug"] / "preferences.json"
+        d["render_engine"] = json.loads(preferences.read_text(encoding="utf-8")).get("render_engine", "canvas") if preferences.exists() else "canvas"
         return d
 
     def create_project(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -89,12 +92,13 @@ class ProjectService:
         proj_dict = self._row_to_dict(row)
         conn.close()
 
+        proj_dict["render_engine"] = data.get("render_engine", "canvas")
         with open(os.path.join(project_dir, "project.json"), "w", encoding="utf-8") as f:
             json.dump(proj_dict, f, indent=2)
 
         # Non-secret project-specific preferences live beside the project assets.
         with open(os.path.join(project_dir, "preferences.json"), "w", encoding="utf-8") as f:
-            json.dump({"source_urls": data.get("source_urls", []), "expressive_voice": data.get("expressive_voice", True)}, f)
+            json.dump({"source_urls": data.get("source_urls", []), "expressive_voice": data.get("expressive_voice", True), "render_engine": data.get("render_engine", "canvas")}, f)
         return proj_dict
 
     def get_project(self, project_id: str) -> Optional[Dict[str, Any]]:
@@ -142,25 +146,30 @@ class ProjectService:
             self._active_jobs.pop(proj["id"], None)
             return True
 
-    def research_inputs(self, project_id, source_urls=None):
+    def research_inputs(self, project_id, source_urls=None, render_engine=None):
         with self._lock:
             project = self.get_project(project_id)
             if not project:
                 raise ValueError("Project not found")
-            if source_urls is not None and self._active_jobs.get(project["id"], {}).get("status") == "running":
+            if (source_urls is not None or render_engine is not None) and self._active_jobs.get(project["id"], {}).get("status") == "running":
                 raise ValueError("Wait for production to finish before editing research inputs.")
             folder = Path(PROJECTS_DIR) / project["slug"]
             path = folder / "preferences.json"
             preferences = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-            if source_urls is not None:
-                preferences["source_urls"] = source_urls
+            if render_engine is not None and render_engine not in ("canvas", "remotion", "hyperframes"):
+                raise ValueError("Unsupported renderer")
+            if source_urls is not None or render_engine is not None:
+                if source_urls is not None:
+                    preferences["source_urls"] = source_urls
+                if render_engine is not None:
+                    preferences["render_engine"] = render_engine
                 folder.mkdir(parents=True, exist_ok=True)
                 temporary = path.with_suffix(".json.tmp")
                 temporary.write_text(json.dumps(preferences, indent=2), encoding="utf-8")
                 temporary.replace(path)
             diagnostics_path = folder / "research" / "research_diagnostics.json"
             diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8")) if diagnostics_path.exists() else None
-            return {"source_urls": preferences.get("source_urls", []), "diagnostics": diagnostics}
+            return {"source_urls": preferences.get("source_urls", []), "render_engine": preferences.get("render_engine", "canvas"), "diagnostics": diagnostics}
 
     def update_project_status(self, project_id: str, stage: str, progress: int, status: str = "processing", error: str = None):
         now = datetime.now(timezone.utc).isoformat()
@@ -234,6 +243,8 @@ class ProjectService:
             if os.path.exists(preferences_path):
                 with open(preferences_path, encoding="utf-8") as f:
                     preferences = json.load(f)
+            render_engine = preferences.get("render_engine", "canvas")
+            framework_service.check_ready(render_engine)
             with open(os.path.join(project_dir, "generation.json"), "w", encoding="utf-8") as f:
                 json.dump(ai_service.public_config(), f, indent=2)
 
@@ -317,7 +328,7 @@ class ProjectService:
                 storyboard=storyboard,
                 style_slug=proj["style_slug"],
                 project_dir=project_dir,
-                progress_cb=comp_prog
+                progress_cb=comp_prog, render_engine=render_engine
             )
 
             # -------------------------------------------------------------
@@ -325,18 +336,16 @@ class ProjectService:
             # -------------------------------------------------------------
             update_job("visuals", 62, f"Generating visual simulation world ({storyboard.get('visual_archetype')})...")
             html_scene_path = os.path.join(project_dir, "visuals", "index.html")
-            visual_service.generate_html_scene(
-                storyboard=storyboard,
-                narration_timing=narration_timing,
-                style_slug=proj["style_slug"],
-                aspect_ratio=proj["aspect_ratio"],
-                output_html_path=html_scene_path,
-                subtitles_enabled=proj["subtitles_enabled"]
-            )
-
-            visual_check = render_service.inspect_scenes(html_scene_path, os.path.join(project_dir, "renders", "style_frames"))
-            with open(os.path.join(project_dir, "renders", "visual_check.json"), "w", encoding="utf-8") as f:
-                json.dump(visual_check, f, indent=2)
+            if render_engine == "canvas":
+                visual_service.generate_html_scene(storyboard, narration_timing, proj["style_slug"],
+                    proj["aspect_ratio"], html_scene_path, proj["subtitles_enabled"])
+                visual_check = render_service.inspect_scenes(html_scene_path, os.path.join(project_dir, "renders", "style_frames"))
+                with open(os.path.join(project_dir, "renders", "visual_check.json"), "w", encoding="utf-8") as f:
+                    json.dump(visual_check, f, indent=2)
+            else:
+                framework_manifest = framework_service.prepare(render_engine, storyboard, narration_timing,
+                    proj["style_slug"], proj["aspect_ratio"], project_dir, fps=proj["fps"],
+                    draft=proj["draft_render"], captions=proj["subtitles_enabled"])
 
             # -------------------------------------------------------------
             # Stage 7: Multi-Stem Procedural Audio Production
@@ -368,14 +377,15 @@ class ProjectService:
             def render_progress(pct, msg):
                 update_job("rendering", pct, msg)
 
-            render_service.render_video_frames(
-                html_path=html_scene_path,
-                output_video_path=raw_video_path,
-                width=w,
-                height=h,
-                fps=fps,
-                progress_cb=render_progress
-            )
+            if render_engine == "canvas":
+                render_service.render_video_frames(html_scene_path, raw_video_path, width=w, height=h,
+                    fps=fps, progress_cb=render_progress)
+            else:
+                framework_service.render(framework_manifest, raw_video_path, progress_cb=render_progress)
+                visual_check = quality_service.inspect_scene_motion(raw_video_path, narration_timing,
+                    actual_dur, os.path.join(project_dir, "renders", "style_frames"))
+                with open(os.path.join(project_dir, "renders", "visual_check.json"), "w", encoding="utf-8") as f:
+                    json.dump(visual_check, f, indent=2)
 
             # -------------------------------------------------------------
             # Stage 9: Mastering & Audio Muxing (-14 LUFS)

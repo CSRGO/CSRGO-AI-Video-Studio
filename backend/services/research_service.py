@@ -158,19 +158,28 @@ class ResearchService:
             raise RuntimeError('No evidence-backed claims were found. Supply more specific topic details or source URLs.')
         return claims
 
+    def plan_search(self, topic):
+        """Query planning must never block retrieval on model JSON formatting.
+
+        Queries are navigation hints, not factual claims. Preserve the user's exact
+        subject/date and obtain facts only from subsequently retrieved articles.
+        """
+        topic = re.sub(r'\s+', ' ', topic).strip()
+        if not topic:
+            raise ValueError('Enter a topic to research.')
+        event = self.detect_event_identity(topic)['is_event']
+        suffixes = ['official statement service status', 'incident report timeline'] if event else ['official documentation', 'explanation sources']
+        return {'queries': [topic] + [f'{topic} {suffix}' for suffix in suffixes],
+                'audience_question': f'What is {topic}, what happened or how does it work, and why does it matter?'}
+
     def research_topic(self, topic, out_dir=None, progress_cb=None, source_urls=None):
         def update(stage, pct, msg):
             if progress_cb:
                 progress_cb(stage, pct, msg)
         identity = self.detect_event_identity(topic)
         update('understanding_topic', 10, 'Identifying the subject, audience context and research questions…')
-        plan = parse_json(ai_service.generate(f'''Plan research for this exact user topic: {topic}
-Today in UTC: {datetime.now(timezone.utc).date()}. Do not invent event dates or assume a root cause.
-For an ambiguous incident establish the date from sources. For an evergreen topic explain the basic concept first.
-Return JSON: {{"queries":["three focused queries including a primary-source query"],"audience_question":"what a newcomer needs to know"}}'''))
-        queries = plan.get('queries', [])[:3]
-        if not queries or not all(isinstance(q, str) for q in queries):
-            raise RuntimeError('Research plan did not contain valid search queries.')
+        plan = self.plan_search(topic)
+        queries = plan['queries']
         candidates = [{'url': u, 'title': u, 'credibility': 'user_supplied'} for u in (source_urls or [])]
         errors, search_attempts = [], []
         update('searching_web', 25, 'Searching for original sources and corroborating coverage…')

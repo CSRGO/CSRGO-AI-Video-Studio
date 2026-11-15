@@ -16,15 +16,20 @@ class ClaudeAnimationWorker:
             return False, str(exc)
 
     def extract_code_block(self, text):
-        matches = re.findall(r'```(?:javascript|js)?\s*(.*?)```', text, re.S | re.I)
+        matches = re.findall(r'```(?:javascript|jsx|tsx|js|html)?\s*(.*?)```', text, re.S | re.I)
         return max(matches, key=len).strip() if matches else text.strip()
 
-    def generate_scene_animation(self, scene, style_slug, project_dir, scene_idx):
+    def generate_scene_animation(self, scene, style_slug, project_dir, scene_idx, render_engine="canvas"):
         context = lemo_loader.production_context(style_slug)
         rule = lemo_loader.load_style_rule(style_slug)
         needs = rule['metadata'].get('needs', [])
         if 'image-generation' in needs:
             raise RuntimeError(f'{style_slug} requires generated image assets. Choose a code-rendered style until image asset generation is configured.')
+        if render_engine == "remotion":
+            return self.generate_remotion_scene(scene, style_slug, project_dir, scene_idx, context, rule)
+        if render_engine == "hyperframes":
+            from backend.services.framework_service import framework_service
+            context += "\n" + framework_service.skill_context("hyperframes")
         name = f'renderDynamicScene_{scene_idx}'
         prompt = f'''Create an original animated shot for the selected Lemo style: {style_slug}.
 ACTUAL STYLE AND PRODUCTION RULES:\n{context}
@@ -61,12 +66,48 @@ Only return executable JavaScript in one javascript code fence. No calls outside
             error = error or f'Missing named function {name}'
         raise RuntimeError(f'Claude Code could not generate scene {scene_idx}: {error}. No placeholder was substituted.')
 
-    def generate_all_components(self, storyboard, style_slug, project_dir, progress_cb=None):
+    def generate_remotion_scene(self, scene, style_slug, project_dir, scene_idx, context, rule):
+        from pathlib import Path
+        from backend.services.framework_service import framework_service, RENDERER
+        folder = Path(project_dir) / "visuals/components"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"scene_{scene_idx:02d}.jsx"
+        prompt = f"""Create a native Remotion React scene for the selected Lemo style {style_slug}.
+{context}
+REMOTION PRODUCTION SKILL:\n{framework_service.skill_context('remotion')}
+SCENE DATA: {json.dumps(scene, ensure_ascii=False)}
+Return one JSX module with export default function Scene({{progress,width,height,scene}}).
+progress runs from 0 to 1 across this shot; use it or Remotion's frame hooks for every animation.
+Only import from react and remotion. Use React HTML/SVG layers and Remotion interpolate/Easing/spring.
+Never use CSS animation, timers, random clocks, network, external fonts, images or unsupported packages.
+Build recognizable topic-specific objects and actions, not generic title slides or decorative loops.
+The selected STYLE.md controls palette, texture, typography, camera, motion and medium-specific storytelling.
+Fill the frame and respect 8% side / 12% top / 22% bottom safe margins. Narration captions are added separately.
+Derive layout from width and height for all aspect ratios. No invented dates, statistics or facts on screen.
+Output only complete JSX in a jsx code fence. This is a scene component, not a Composition or registerRoot entry."""
+        error, previous = '', ''
+        for _ in range(3):
+            response = ai_service.generate(prompt + (f"\nRepair error: {error}\nPrevious module:\n{previous}" if error else ''), purpose='coding')
+            code = self.extract_code_block(response)
+            path.write_text(code, encoding='utf-8')
+            result = subprocess.run(['node', str(RENDERER / 'validate-component.mjs'), str(path.resolve())],
+                capture_output=True, text=True, timeout=20)
+            if result.returncode == 0:
+                manifest = {'scene_index': scene_idx, 'component_path': str(path), 'style_slug': style_slug,
+                    'engine': 'Claude Code', 'renderer': 'remotion', 'model': ai_service.config()['coding_model'],
+                    'style_source': rule['raw_md_path'], 'status': 'syntax_valid'}
+                Path(str(path) + '.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+                return {**manifest, 'component_code': code}
+            error, previous = result.stderr[-2000:], code
+        path.unlink(missing_ok=True)
+        raise RuntimeError(f'Claude Code could not generate Remotion scene {scene_idx}: {error}. No placeholder was substituted.')
+
+    def generate_all_components(self, storyboard, style_slug, project_dir, progress_cb=None, render_engine="canvas"):
         result = []
         for idx, scene in enumerate(storyboard['scenes'], 1):
             if progress_cb:
                 progress_cb(52 + int(idx / len(storyboard['scenes']) * 12), f'Generating {style_slug}: scene {idx}/{len(storyboard["scenes"])}')
-            result.append(self.generate_scene_animation(scene, style_slug, project_dir, idx))
+            result.append(self.generate_scene_animation(scene, style_slug, project_dir, idx, render_engine=render_engine))
         return result
 
 claude_animation_worker = ClaudeAnimationWorker()

@@ -87,3 +87,8 @@ backup_*/
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+
+# Remotion browser cache and generated renderer bundles
+.remotion/
+renderer/.cache/
+renderer/.generated/

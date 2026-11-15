@@ -42,7 +42,8 @@ class SearchRecoveryTests(unittest.TestCase):
         client = self.client_for(handler)
         with tempfile.TemporaryDirectory() as folder, \
              patch('backend.services.research_service.httpx.Client', return_value=client), \
-             patch('backend.services.research_service.ai_service.generate', return_value='{"queries":["Outlook incident"]}') as generate:
+             patch('backend.services.research_service.ai_service.generate') as generate, \
+             patch.object(ResearchService, 'plan_search', return_value={'queries': ['Outlook incident']}):
             with self.assertRaises(RuntimeError) as failure:
                 ResearchService().research_topic('Outlook outage', out_dir=folder)
             self.assertIn('verification challenge', str(failure.exception))
@@ -51,7 +52,7 @@ class SearchRecoveryTests(unittest.TestCase):
             diagnostics = json.loads((Path(folder) / 'research_diagnostics.json').read_text())
             self.assertEqual(len(diagnostics['search_attempts']), 2)
             self.assertEqual(diagnostics['readable_sources'], 0)
-            self.assertEqual(generate.call_count, 1)  # No fabricated research synthesis.
+            self.assertEqual(generate.call_count, 0)  # Search never needs model-generated JSON.
 
     def test_proxy_denial_is_distinct_from_challenge(self):
         def handler(request):
@@ -66,7 +67,6 @@ class SearchRecoveryTests(unittest.TestCase):
     def test_direct_articles_work_without_any_search_provider(self):
         article = 'Outlook is an email application. ' * 8
         responses = [
-            {'queries': ['Outlook email']},
             {'claims': [{'claim_text': 'Outlook is an email application.', 'evidence': [
                 {'source_id': 'SRC-01', 'quote': 'Outlook is an email application.'}]}]},
             {'supported_claim_ids': ['CLM-01'], 'issues': []},
@@ -78,6 +78,13 @@ class SearchRecoveryTests(unittest.TestCase):
         search.assert_not_called()
         self.assertEqual(len(result['claims']), 1)
         self.assertEqual(result['sources'][0]['credibility'], 'user_supplied')
+
+    def test_search_planning_never_calls_model_or_invents_incident_dates(self):
+        with patch('backend.services.research_service.ai_service.generate', return_value='{"queries": []}') as generate:
+            plan = ResearchService().plan_search('Microsoft Outlook outage January 2023')
+        generate.assert_not_called()
+        self.assertEqual(plan['queries'][0], 'Microsoft Outlook outage January 2023')
+        self.assertTrue(all('2023' in query and '2026' not in query for query in plan['queries']))
 
     def test_recovery_url_validation(self):
         from backend.api.routes import ResearchInputsRequest

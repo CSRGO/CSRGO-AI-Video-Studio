@@ -38,7 +38,7 @@ export default function App() {
     music_enabled: true,
     sfx_enabled: true,
     subtitles_enabled: true,
-    draft_render: false, expressive_voice: true
+    draft_render: false, expressive_voice: true, render_engine: 'remotion'
   });
 
   const [notice, setNotice] = useState('');
@@ -46,6 +46,7 @@ export default function App() {
   const [sourceText, setSourceText] = useState('');
   const [recoverySources, setRecoverySources] = useState('');
   const [researchDiagnostics, setResearchDiagnostics] = useState(null);
+  const [recoveryEngine, setRecoveryEngine] = useState('canvas');
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState('');
   const [copiedNotification, setCopiedNotification] = useState(false);
@@ -110,6 +111,7 @@ export default function App() {
         const inputs = await resInputs.json();
         setRecoverySources((inputs.source_urls || []).join('\n'));
         setResearchDiagnostics(inputs.diagnostics);
+        setRecoveryEngine(inputs.render_engine || 'canvas');
       } else { setRecoverySources(''); setResearchDiagnostics(null); }
 
       if (resR && resR.ok) setProjectResearch(await resR.json());
@@ -196,6 +198,7 @@ export default function App() {
 
       const newProj = await createRes.json();
       setActiveProject(newProj);
+      setRecoveryEngine(newProj.render_engine || 'canvas');
 
       // 2. Trigger research-driven production pipeline
       const produceRes = await fetch(`${API}/api/projects/${newProj.id}/produce`, {
@@ -223,10 +226,10 @@ export default function App() {
   async function retryProduction(saveSources = false) {
     setCreating(true); setNotice('');
     try {
-      if (saveSources) {
+      {
         const update = await fetch(`${API}/api/projects/${activeProject.id}/research-inputs`, {
           method: 'PUT', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ source_urls: recoverySources.split(/\n/).map(s => s.trim()).filter(Boolean) })
+          body: JSON.stringify({ render_engine: recoveryEngine, ...(saveSources ? { source_urls: recoverySources.split(/\n/).map(s => s.trim()).filter(Boolean) } : {}) })
         });
         if (!update.ok) { const error = await update.json(); throw new Error(typeof error.detail === 'string' ? error.detail : 'Enter up to six valid HTTP(S) article URLs.'); }
       }
@@ -479,7 +482,7 @@ export default function App() {
                         <button
                           className="secondary-button"
                           onClick={() => {
-                            setActiveProject(p); setActiveJob(null);
+                            setActiveProject(p); setRecoveryEngine(p.render_engine || 'canvas'); setActiveJob(null);
                             loadProjectDetails(p.id);
                             setActiveTab('queue');
                           }}
@@ -612,6 +615,15 @@ export default function App() {
                   </select>
                 </label>
               </div>
+
+              <label className="field-label" style={{ marginTop: 20 }}>Video renderer
+                <select aria-label="Video renderer" value={formData.render_engine} onChange={e => setFormData(p => ({ ...p, render_engine: e.target.value }))}>
+                  <option value="remotion">Remotion — React/SVG scenes and frame-based motion</option>
+                  <option value="hyperframes">Hyperframes — HTML/Canvas timeline and native checks</option>
+                  <option value="canvas">Canvas — legacy Chromium renderer</option>
+                </select>
+                <small>The selected Lemo style directs the visuals; the renderer controls how the code becomes video. Node 22+ and renderer dependencies are required.</small>
+              </label>
 
               {/* Style Selector */}
               <div style={{ marginTop: '20px' }}>
@@ -806,6 +818,11 @@ export default function App() {
                     {activeJob?.message || activeProject.error_message || 'Processing workflow...'}
                   </div>
 
+                  {['draft', 'failed'].includes(activeProject.status) && <label className="field-label" style={{ marginTop: 16 }}>Video renderer for this project
+                    <select aria-label="Video renderer for this project" value={recoveryEngine} onChange={e => setRecoveryEngine(e.target.value)}>
+                      <option value="remotion">Remotion (React scenes)</option><option value="hyperframes">Hyperframes (HTML/Canvas)</option><option value="canvas">Canvas (legacy)</option>
+                    </select>
+                  </label>}
                   {['draft', 'failed'].includes(activeProject.status) && <button className="primary-button" disabled={creating} onClick={() => retryProduction()} style={{ marginTop: 16 }}>
                     {creating ? 'Starting…' : activeProject.status === 'failed' ? 'Retry production' : 'Start production'}
                   </button>}
@@ -1136,7 +1153,7 @@ export default function App() {
                     <button
                       className="secondary-button"
                       onClick={() => {
-                        setActiveProject(p); setActiveJob(null);
+                        setActiveProject(p); setRecoveryEngine(p.render_engine || 'canvas'); setActiveJob(null);
                         loadProjectDetails(p.id);
                         setActiveTab('queue');
                       }}

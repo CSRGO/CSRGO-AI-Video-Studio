@@ -50,12 +50,15 @@ echo "[5/6] Verifying / downloading Kokoro TTS model weights..."
 echo "[6/6] Installing frontend dependencies..."
 if [ -d "frontend" ]; then
     cd frontend
-    npm install
+    npm ci
     cd ..
 fi
 
 echo ""
 echo "==================================================="
+echo "Installing native video renderers (Node 22+)..."
+npm ci --prefix renderer
+
 echo "    VERIFYING INSTALLATION & SUBSYSTEMS"
 echo "==================================================="
 "$PY_BIN" verify_installation.py
