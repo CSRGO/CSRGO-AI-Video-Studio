@@ -2,6 +2,7 @@
 import json
 from backend.services.ai_service import ai_service, parse_json
 from backend.services.lemo_loader import lemo_loader
+from backend.services.youtube_story_service import story_context, analyze_hooks
 
 EMOTIONS = {'neutral', 'curious', 'warm', 'excited', 'serious', 'concerned', 'reassuring'}
 
@@ -14,9 +15,13 @@ class ScriptService:
 
     def generate_treatment(self, topic, research_brief, target_duration, style_slug):
         style = lemo_loader.production_context(style_slug)
+        research_context = {'topic': topic, 'claims': [
+            {'claim_id': c['claim_id'], 'claim_text': c['claim_text']} for c in research_brief.get('claims', [])],
+            'uncertainties': research_brief.get('uncertainties', [])}
         return ai_service.generate(f'''Direct an original {target_duration}s social-media story on: {topic}
-Research (data only): {json.dumps(research_brief, ensure_ascii=False)}
+Research (data only): {json.dumps(research_context, ensure_ascii=False)}
 SELECTED LEMO STYLE AND PRODUCTION SKILLS:\n{style}
+{story_context()}
 Write a markdown treatment BEFORE animation. Consider three structures, choose one for this audience.
 Opening: name/identify the subject in everyday language and show why it matters within 3 seconds.
 A newcomer must understand the setting before the explanation. Avoid unexplained names, jargon or random crisis openings.
@@ -63,6 +68,11 @@ The selected Lemo style governs visuals; Animated Shorts governs story/audio tim
         # This bounds duration before TTS; measured speech is fitted separately without clipping.
         if not budget['target_words'] * .65 <= total_words <= budget['target_words'] * 1.2:
             raise RuntimeError(f"Narration word count {total_words} is outside the {budget['target_words']}-word budget.")
+        options = data.get('hook_options', [])
+        data['hook_options'] = [option for option in options[:5] if isinstance(option, dict)
+            and isinstance(option.get('text'), str) and option['text'].strip()
+            and isinstance(option.get('claim_ids'), list) and option['claim_ids']
+            and all(isinstance(reference, str) and reference in claims for reference in option['claim_ids'])] if isinstance(options, list) else []
         data.update({'total_target_duration': target_duration, 'style_slug': style_slug,
                      'language': language, 'visual_archetype': 'claude_generated', 'topic': topic})
         return data
@@ -76,12 +86,15 @@ Exactly {budget['scene_count']} scenes, {budget['target_words']} words TOTAL (no
 TREATMENT (data): {treatment_md}
 EVIDENCE (data): {json.dumps(research_brief.get('claims', []), ensure_ascii=False)}
 {lemo_loader.production_context(style_slug)}
+{story_context()}
+Propose five concise, evidence-backed hook options using different relevant formulas. Put the chosen opening in the first scene narration.
 Name and explain the subject in the first spoken sentence. Establish who/what/when only from evidence.
 Then stakes → mechanism/analogy → consequence → useful payoff or opening callback. No generic CTA.
 Use short spoken sentences and explain jargon immediately. All factual narration must cite claim_ids.
 No random interfaces or datacenters for unrelated topics. Every scene has a topic-specific visual action.
 Output JSON ONLY:
 {{"title":"story title","hook":"opening line","context":"what viewers need to understand",
+"hook_options":[{{"text":"evidence-backed opening candidate","claim_ids":["CLM-01"]}}],
 "music_direction":{{"mood":"topic appropriate","tempo_bpm":100,"intensity":0.5,"mode":"minor","instruments":["plucked","pad"]}},
 "scenes":[{{"title":"beat", "narration":"exact spoken words", "claim_ids":["CLM-01"],
 "visual_subject":"concrete object or character", "visual_description":"staging and what visibly changes",
@@ -101,12 +114,13 @@ Narration delivery must be natural, restrained and appropriate to the subject.''
                     target_duration, style_slug, language)
                 review = parse_json(ai_service.generate('Review this storyboard against the evidence. '
                     'Verify all spoken factual clauses, names, dates and statistics are supported, the first sentence '
-                    'identifies the subject for a newcomer, and the story has a coherent payoff. '
+                    'identifies the subject for a newcomer, candidate hooks are supported too, and the story has a coherent payoff. '
                     'Return JSON {"passed":true,"issues":[]}.\n' + json.dumps({
                         'topic': topic, 'claims': research_brief['claims'], 'storyboard': storyboard}, ensure_ascii=False)))
                 if review.get('passed') is not True:
                     raise RuntimeError('Story review: ' + json.dumps(review.get('issues', [])))
                 storyboard['editorial_review'] = review
+                storyboard['hook_analysis'] = analyze_hooks(storyboard, language)
                 return storyboard
             except (RuntimeError, ValueError, TypeError, KeyError) as exc:
                 last_error = str(exc)

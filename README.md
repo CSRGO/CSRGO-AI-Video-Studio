@@ -81,6 +81,10 @@ The earlier strict model-JSON query planner has been removed: malformed or missi
 
 If research still fails, open the project in **Production & Inspect → Research recovery**, paste trusted article URLs about the same incident/date, and click **Save sources & retry**. The existing project and selected model are preserved. Direct article URLs skip search engines but still require Internet access to read the articles. Provider diagnostics are saved in the project's `research/research_diagnostics.json` and shown in the recovery panel. Restricted environments must allow `html.duckduckgo.com`, `www.bing.com`, and the article hosts they need to read.
 
+Research now uses a small, numbered passage catalog instead of asking the model to copy full articles. The app attaches the original quotation and character offsets. Invalid citations receive up to three repair attempts; valid claims survive a partially invalid response. Typography-only differences in legacy quotations are normalized, but changed words, numbers and negation are rejected. If extraction remains malformed, exact article excerpts become candidates for a separate topic/evidence review. They cannot bypass that review. Sources and passages are retained before model processing; retries reuse articles for up to 15 minutes only when topic and input URLs match.
+
+The [YouTube agent skill](https://github.com/jakeschincariol/youtube-agent-skill)'s MIT `yt-script` instructions and 21 hook formulas inform the treatment and storyboard. Its actual Python scorer ranks the reviewed English opening and available alternative hooks; results appear in Visual Scenes and `script/hook_analysis.json`. Scores describe writing heuristics, not factual reliability or predicted views. The app uses the configured narrator, without claiming a learned personal creator voice, and does not upload to YouTube. This integration adds no mandatory hook-generation stage that could prevent a valid storyboard from rendering.
+
 ## Files and cleanup
 
 Each project keeps research, treatment, storyboard, generated scene code, speech, audio stems, captions, test frames and final export under `projects/<slug>`. Successful exports are also copied to `output`.
@@ -109,3 +113,5 @@ The older root-level acceptance scripts target the previous hard-coded demo pipe
 
 - [Hyperframes](https://github.com/heygen-com/hyperframes): pinned native renderer and production skill, Apache-2.0.
 - [Remotion](https://github.com/remotion-dev/remotion) and [official agent skills](https://github.com/remotion-dev/skills): pinned renderer, native composition API and frame-driven React guidance; see the upstream license and `renderer/skills/README.md` for provenance.
+
+- [YouTube agent skill](https://github.com/jakeschincariol/youtube-agent-skill): vendored MIT `yt-script` instructions, hook formulas and executable scoring tool; provenance in `vendor/youtube-agent-skill/README.md`.

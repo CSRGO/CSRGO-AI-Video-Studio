@@ -291,6 +291,9 @@ class ProjectService:
             with open(os.path.join(project_dir, "storyboard", "storyboard.json"), "w", encoding="utf-8") as f:
                 json.dump(storyboard, f, indent=2)
 
+            with open(os.path.join(project_dir, "script", "hook_analysis.json"), "w", encoding="utf-8") as f:
+                json.dump(storyboard.get("hook_analysis", {}), f, indent=2, ensure_ascii=False)
+
             shot_list = script_service.generate_shot_list(storyboard)
             with open(os.path.join(project_dir, "script", "SHOT_LIST.json"), "w", encoding="utf-8") as f:
                 json.dump(shot_list, f, indent=2)

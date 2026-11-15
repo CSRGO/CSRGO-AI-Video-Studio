@@ -836,7 +836,9 @@ export default function App() {
                     <button className="primary-button" style={{ marginTop: 12 }} disabled={creating || !recoverySources.trim()} onClick={() => retryProduction(true)}>
                       {creating ? 'Starting…' : 'Save sources & retry'}
                     </button>
-                    {researchDiagnostics && <details style={{ marginTop: 14 }}><summary>Search diagnostics</summary>
+                    {researchDiagnostics && <details style={{ marginTop: 14 }}><summary>Research diagnostics</summary>
+                      {researchDiagnostics.reused_sources && <p>Reusing recently retrieved articles; citations and relevance are checked again.</p>}
+                      {(researchDiagnostics.citation_attempts || []).map((a, i) => <p key={`citation-${i}`}>Citation check {a.attempt}: {a.accepted_total} accepted; {(a.rejected || []).length} needed repair.</p>)}
                       <ul>{(researchDiagnostics.search_attempts || []).map((a, i) => <li key={i}>{a.provider}: {a.reason || `${a.results} results`}</li>)}</ul>
                       {(researchDiagnostics.warnings || []).map((warning, i) => <p key={i}>{warning}</p>)}
                     </details>}
@@ -1085,6 +1087,17 @@ export default function App() {
                         <p style={{ color: '#888' }}>Storyboard is compiling...</p>
                       ) : (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                          {projectStoryboard.hook_analysis && <section className="qc-box">
+                            <h3>YouTube script hook review</h3>
+                            <p>{projectStoryboard.hook_analysis.selected_hook}</p>
+                            {projectStoryboard.hook_analysis.scored ? <>
+                              <p>{projectStoryboard.hook_analysis.note}</p>
+                              {(projectStoryboard.hook_analysis.top_two || []).map((hook, i) => <div key={i} style={{ marginTop: 12 }}>
+                                <strong>{hook.verdict}/100 · {hook.formula}{hook.selected_for_narration ? ' · used in narration' : ' · alternative'}</strong>
+                                <p>{hook.hook}</p>
+                              </div>)}
+                            </> : <p>{projectStoryboard.hook_analysis.reason}</p>}
+                          </section>}
                           {projectStoryboard.scenes?.map((sc, i) => (
                             <div key={i} className="info-card">
                               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>

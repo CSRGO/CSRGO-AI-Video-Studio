@@ -84,16 +84,21 @@ class NativeExportTests(unittest.TestCase):
         from backend.services.research_service import research_service
         text1 = 'Outlook is an email app that synchronizes messages with a mail server.'
         text2 = 'If the connection fails, messages cannot synchronize until service returns.'
-        claims = [{'claim_text': text, 'evidence': [{'source_id':'SRC-01','quote':text}]} for text in [text1,text2]]
+        claims = [{'claim_text': text, 'passage_ids': [f'P{i:03d}']} for i,text in enumerate([text1,text2],1)]
+        research_calls = 0
         scenes = [{'title':title,'narration':text,'claim_ids':[f'CLM-0{i}'],
                    'visual_subject':title,'visual_description':'A recognizable mailbox changes as a message moves.',
                    'emotion':'curious','sound_events':[{'progress':.5,'cue':'click','action':'mail changes'}]}
                   for i,(title,text) in enumerate([('Mailbox synchronization',text1),('Connection interrupted',text2)],1)]
         def generate(prompt, **kwargs):
+            nonlocal research_calls
             if 'Create a native Remotion React scene' in prompt:
                 code = REACT_SCENE if 'Mailbox synchronization' in prompt else REACT_SCENE.replace('#18336B','#264d7e').replace('EMAIL TEST FIXTURE','CONNECTION TEST FIXTURE')
                 return '```jsx\n'+code+'\n```'
             if prompt.startswith('Research the exact topic'):
+                research_calls += 1
+                if research_calls == 1:
+                    return json.dumps({'claims':[{'claim_text':text1,'evidence':[{'source_id':'SRC-01','quote':'An invalid model quotation that does not match the article.'}]}]})
                 return json.dumps({'claims':claims})
             if prompt.startswith('Review these claims'):
                 return json.dumps({'supported_claim_ids':['CLM-01','CLM-02'],'issues':[]})

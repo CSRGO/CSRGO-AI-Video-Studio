@@ -192,7 +192,13 @@ class QualityService:
                     return {"passed": False, "reason": f"Claim {c.get('claim_id')} lacks verified source citation"}
 
             from backend.services.research_service import research_service
-            research_service.validate_claims(claims, sources)
+            passages_path = os.path.join(project_dir, "research", "passages.json")
+            if os.path.exists(passages_path):
+                with open(passages_path, encoding="utf-8") as f:
+                    passages = json.load(f)
+            else:
+                passages = []
+            research_service.validate_claims(claims, sources, passages)
             return {
                 "passed": True,
                 "claims_count": len(claims),
