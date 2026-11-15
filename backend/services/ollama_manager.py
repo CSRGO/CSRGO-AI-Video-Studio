@@ -141,7 +141,7 @@ class OllamaManager:
     def verify_claude_code_installation(self) -> bool:
         try:
             cmd = [self.claude_executable, "--version"]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=5)
             if res.returncode == 0:
                 self._state["claude_code_installed"] = True
                 self._state["claude_code_version"] = res.stdout.strip()
@@ -176,7 +176,7 @@ class OllamaManager:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True, encoding="utf-8"
             )
             stdout, stderr = proc.communicate(timeout=25)
             if proc.returncode == 0 and len(stdout.strip()) > 0:

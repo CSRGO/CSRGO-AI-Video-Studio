@@ -9,7 +9,7 @@ from backend.services.lemo_loader import lemo_loader
 class ClaudeAnimationWorker:
     def validate_js_syntax(self, js_code):
         try:
-            result = subprocess.run(['node', '--check', '-'], input=js_code, text=True,
+            result = subprocess.run(['node', '--check', '-'], input=js_code, text=True, encoding="utf-8",
                                     capture_output=True, timeout=10)
             return result.returncode == 0, result.stderr.strip()
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -91,7 +91,7 @@ Output only complete JSX in a jsx code fence. This is a scene component, not a C
             code = self.extract_code_block(response)
             path.write_text(code, encoding='utf-8')
             result = subprocess.run(['node', str(RENDERER / 'validate-component.mjs'), str(path.resolve())],
-                capture_output=True, text=True, timeout=20)
+                capture_output=True, text=True, encoding="utf-8", timeout=20)
             if result.returncode == 0:
                 manifest = {'scene_index': scene_idx, 'component_path': str(path), 'style_slug': style_slug,
                     'engine': 'Claude Code', 'renderer': 'remotion', 'model': ai_service.config()['coding_model'],

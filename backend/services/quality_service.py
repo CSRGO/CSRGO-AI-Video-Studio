@@ -26,7 +26,7 @@ class QualityService:
             video_path
         ]
 
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=30)
         if res.returncode != 0:
             return {"valid": False, "error": f"FFprobe failed: {res.stderr}"}
 

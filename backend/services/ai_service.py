@@ -150,7 +150,7 @@ class AIService:
         full_prompt = ((system + '\n\n') if system else '') + prompt
         try:
             result = subprocess.run(cmd, input=full_prompt, env=env, cwd=str(ROOT),
-                capture_output=True, text=True, timeout=cfg['timeout_seconds'])
+                capture_output=True, text=True, encoding="utf-8", timeout=cfg['timeout_seconds'])
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"Claude Code timed out after {cfg['timeout_seconds']} seconds.") from exc
         if result.returncode or not result.stdout.strip():

@@ -1,4 +1,6 @@
 @echo off
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 TITLE CSRGO AI Video Studio - Windows Setup
 echo ===================================================
 echo     CSRGO AI VIDEO STUDIO - ENVIRONMENT SETUP

@@ -1,4 +1,6 @@
 @echo off
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 TITLE CSRGO AI Video Studio Launcher
 
 set "ROOT_DIR=%~dp0"

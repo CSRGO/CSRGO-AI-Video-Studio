@@ -20,7 +20,7 @@ class FrameworkService:
             raise ValueError('Unsupported renderer')
         if not shutil.which('node') or not (RENDERER / 'node_modules' / ('remotion' if engine == 'remotion' else 'hyperframes')).exists():
             raise RuntimeError('Renderer dependencies are missing. Run npm ci in the renderer directory (Node 22+).')
-        version = subprocess.run(['node', '--version'], capture_output=True, text=True, timeout=5)
+        version = subprocess.run(['node', '--version'], capture_output=True, text=True, encoding="utf-8", timeout=5)
         if version.returncode or int(version.stdout.strip().lstrip('v').split('.')[0]) < 22:
             raise RuntimeError('Remotion/Hyperframes integration requires Node.js 22 or later.')
 
@@ -108,7 +108,7 @@ window.addEventListener('hf-seek',e=>window.render(e.detail.time));
 
     def _run(self, command, cwd, env, progress_cb=None, timeout=1800):
         output = []
-        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
         timer = threading.Timer(timeout, process.kill)
         timer.start()
         try:

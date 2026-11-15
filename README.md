@@ -28,10 +28,12 @@ On Linux/macOS, use `.venv/bin/python` instead. If a system Chromium is already 
 Start the backend from the repository root:
 
 ```powershell
-.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+.venv\Scripts\python.exe -X utf8 -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
 In another terminal, run `npm run dev` from `frontend`, then open the dashboard on port 5173. Use a single backend worker: production jobs run in that process. Restarted jobs become interrupted/failed rather than appearing to run indefinitely.
+
+On Windows, the launcher enables `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`. Backend text pipes also explicitly use UTF-8, so arrows, non-Latin narration and generated code do not depend on the Windows ANSI code page. If starting Python manually, keep `-X utf8` in the backend command above.
 
 ## Connect your FreeLLMAPI desktop
 

@@ -34,7 +34,7 @@ class GitHubService:
         try:
             # Safe shallow clone using argument array
             cmd = ["git", "clone", "--depth", "1", repo_url, target_clone_dir]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=90)
             if res.returncode != 0:
                 raise RuntimeError(f"Git clone failed: {res.stderr}")
 
